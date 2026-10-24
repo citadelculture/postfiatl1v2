@@ -66,6 +66,41 @@ fn fastswap_store_migrate_reaches_its_offline_handler() {
 }
 
 #[test]
+fn fastswap_committee_migrate_reaches_its_offline_handler() {
+    let args = |extra: &[&str]| {
+        std::iter::once("fastswap-committee-migrate")
+            .chain(extra.iter().copied())
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(run_cli(args(&[])).unwrap_err(), "missing --data-dir");
+    let data_dir = std::env::temp_dir().join(format!(
+        "postfiat-fastswap-committee-migrate-cli-{}",
+        std::process::id()
+    ));
+    let data = data_dir.to_str().expect("utf-8 path");
+    assert_eq!(
+        run_cli(args(&["--data-dir", data])).unwrap_err(),
+        "missing --committee-file"
+    );
+    let missing = run_cli(args(&[
+        "--data-dir",
+        data,
+        "--committee-file",
+        "c.json",
+        "--anchor-file",
+        "a.json",
+        "--dry-run",
+    ]))
+    .unwrap_err();
+    assert!(
+        missing.starts_with("fastswap-committee-migrate refused: FastSwap store")
+            && missing.ends_with("does not exist"),
+        "{missing}"
+    );
+}
+
+#[test]
 fn storage_activation_and_cancellation_commands_reach_their_cli_handlers() {
     let activation_template = run_cli(vec!["storage-activation-template".to_string()])
         .expect_err("missing activation height must fail in the command handler");
@@ -235,4 +270,64 @@ mod replicated_state_activation_cli_tests {
 
 #[cfg(test)]
 mod market_ops_replay_cli_tests {
+}
+
+#[test]
+fn operator_attestation_commands_reach_their_cli_handler() {
+    let root = std::env::temp_dir().join(format!(
+        "postfiat-operator-attestation-cli-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).expect("create fixture root");
+    let path = |name: &str| root.join(name).to_str().expect("utf-8 path").to_string();
+    let fingerprint = "ab".repeat(32);
+    let args = |items: &[&str]| {
+        items
+            .iter()
+            .map(|item| item.to_string())
+            .collect::<Vec<_>>()
+    };
+    run_cli(args(&[
+        "operator-onboarding-keygen",
+        "--validator-id",
+        "validator-0",
+        "--master-key-file",
+        &path("master.json"),
+        "--validator-key-file",
+        &path("validator.json"),
+    ]))
+    .expect("generate onboarding keys");
+    run_cli(args(&[
+        "operator-attestation-create",
+        "--master-key-file",
+        &path("master.json"),
+        "--validator-id",
+        "validator-0",
+        "--onboarding-challenge-id",
+        &fingerprint,
+        "--operator",
+        "test-operator",
+        "--observed-at",
+        "2026-10-17T00:00:00Z",
+        "--kind",
+        "host",
+        "--host-fingerprint",
+        &fingerprint,
+        "--host-admin-fingerprint",
+        &fingerprint,
+        "--output",
+        &path("host.json"),
+    ]))
+    .expect("create the host-control attestation");
+    run_cli(args(&[
+        "operator-attestation-verify",
+        "--attestation-file",
+        &path("host.json"),
+    ]))
+    .expect("verify the host-control attestation");
+    std::fs::remove_dir_all(root).expect("remove fixture root");
 }

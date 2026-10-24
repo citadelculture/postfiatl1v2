@@ -3118,8 +3118,11 @@ fn every_live_governance_amendment_kind_uses_the_signed_authorization_boundary()
             1004,
         ),
         (GOVERNANCE_KIND_ATOMIC_SWAP_ACTIVATION_HEIGHT, 1001),
+        (GOVERNANCE_KIND_REJECTED_TX_FEE_ACTIVATION_HEIGHT, 1005),
+        (GOVERNANCE_KIND_REQUIRE_MEMO_ACTIVATION_HEIGHT, 1006),
         (GOVERNANCE_KIND_REPLICATED_STATE_V2_ACTIVATION_HEIGHT, 1002),
         (GOVERNANCE_KIND_SHIELDED_ATOMIC_BATCH_ACTIVATION_HEIGHT, 1003),
+        (GOVERNANCE_KIND_RECIPIENT_FORMAT_ACTIVATION_HEIGHT, 1005),
         (GOVERNANCE_KIND_CRYPTO_POLICY, 3),
         (GOVERNANCE_KIND_CRYPTO_POLICY, 2),
     ];
@@ -3208,7 +3211,10 @@ fn every_live_governance_amendment_kind_uses_the_signed_authorization_boundary()
         Some(1004)
     );
     assert_eq!(governance.atomic_swap_activation_height(), Some(1001));
+    assert_eq!(governance.rejected_tx_fee_activation_height(), Some(1005));
+    assert_eq!(governance.require_memo_activation_height(), Some(1006));
     assert_eq!(governance.replicated_state_v2_activation_height(), Some(1002));
+    assert_eq!(governance.recipient_format_activation_height(), Some(1005));
     assert_eq!(governance.amendment_rollback_records.len(), 1);
     assert_eq!(governance.amendment_rollback_records[0].previous_value, 3);
     assert_eq!(governance.amendment_rollback_records[0].restored_value, 2);
@@ -4657,32 +4663,29 @@ fn account_tx_index_explicit_build_catches_up_after_archive_prune() {
         data_dir: data_dir.clone(),
     })
     .expect("second account_tx index status before explicit catch-up");
+    // The commit extended both the aggregate and the disk index.
     assert!(second_stale_index.index_present);
-    assert!(!second_stale_index.index_usable);
-    assert_eq!(
-        second_stale_index.reason.as_deref(),
-        Some("account_tx index tip hash is stale")
-    );
+    assert!(second_stale_index.index_usable);
+    assert_eq!(second_stale_index.reason, None);
+    assert_eq!(second_stale_index.index_lag_blocks, Some(0));
     assert!(second_stale_index.disk_index_present);
-    assert!(!second_stale_index.disk_index_usable);
-    assert_eq!(
-        second_stale_index.disk_index_reason.as_deref(),
-        Some("account_tx disk index tip hash is stale")
-    );
-    let second_scan_history = account_tx(AccountTxQueryOptions {
+    assert!(second_stale_index.disk_index_usable);
+    assert_eq!(second_stale_index.disk_index_reason, None);
+    assert_eq!(second_stale_index.disk_index_lag_blocks, Some(0));
+    let second_history = account_tx(AccountTxQueryOptions {
         data_dir: data_dir.clone(),
         address: key_file.address.clone(),
         from_height: Some(1),
         to_height: Some(2),
         limit: Some(10),
     })
-    .expect("scan faucet account history with stale index");
-    assert!(!second_scan_history.index_used);
-    assert_eq!(second_scan_history.scanned_block_count, 2);
-    assert_eq!(second_scan_history.archive_lookup_count, 2);
-    assert_eq!(second_scan_history.row_count, 2);
-    assert_eq!(second_scan_history.rows[0].tx_id, first_receipts[0].tx_id);
-    assert_eq!(second_scan_history.rows[1].tx_id, second_receipts[0].tx_id);
+    .expect("faucet account history from the followed disk index");
+    assert!(second_history.index_used);
+    assert_eq!(second_history.scanned_block_count, 0);
+    assert_eq!(second_history.archive_lookup_count, 0);
+    assert_eq!(second_history.row_count, 2);
+    assert_eq!(second_history.rows[0].tx_id, first_receipts[0].tx_id);
+    assert_eq!(second_history.rows[1].tx_id, second_receipts[0].tx_id);
 
     let store = NodeStore::new(&data_dir);
     let mut archive = store.read_batch_archive().expect("batch archive");

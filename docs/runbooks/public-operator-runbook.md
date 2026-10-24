@@ -401,6 +401,21 @@ verification steps an operator can perform on a published release:
    rejected expected receipts, committee-roster mismatch, or any failed
    conservation or security invariant.
 
+!!! note "Storage: transactional `redb` store and its qualification packet"
+
+    Validators have run the transactional `redb` store since height 930
+    (2026-08-31). The current binary is `eea96ba6…` (release
+    `store-handle-20261021`, source `86706699`). Give each store one writer
+    process; see the live-canary postmortem above. Its storage evidence packet
+    is `~/.cache/storage-packet-20261023/packet-r3/` on the work server (not
+    in git), checksum manifest `357f06ee…`. Check it offline with
+    `PYTHONPATH=python python3 -m postfiat_rpc.storage_scaling verify PACKET`
+    (output `e4fba47e…`). Browse it read-only with `... serve PACKET`, which
+    serves only a verified packet on loopback. The store is `OFFLINE
+    QUALIFIED` (2026-10-23). That is neither `CLONE QUALIFIED` nor a
+    deployment decision
+    ([storage milestone](../plans/completed/storage-scaling-milestone.md#g5-offline-qualification-packet)).
+
 !!! warning "Gap: no public-testnet release has run this process"
 
     [Release-gate inventory](../status/release-gate-inventory.md) rows 6–8

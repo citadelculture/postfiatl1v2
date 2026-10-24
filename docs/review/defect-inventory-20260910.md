@@ -1,13 +1,13 @@
 # QA defect inventory — 2026-09-10
 
 Status: burn 2 inventory reconciled; burn 3–6 findings appended; P3 sweep recorded.
-The inventory has 141 rows: 26 P1, 77 P2 and 38 P3. The burn 2
+The inventory has 142 rows: 27 P1, 77 P2 and 38 P3. The burn 2
 Text Improvement Harness result is in the [2026-09-10 campaign log](qa-campaign-20260910.md);
 the burn 3 gate is in the [2026-09-11 campaign log](qa-campaign-20260911.md);
 the burn 4 gate is in the [2026-09-15 campaign log](qa-campaign-20260915.md);
 the burn 5 gate is in the [2026-09-16 campaign log](qa-campaign-20260916.md);
 the burn 6 gate is recorded in the [2026-09-21 campaign log](qa-campaign-20260921.md#scores).
-That gate predates the four A5/NOD- additions; this extension was not rescored.
+That gate predates the four A5/NOD- additions and the 2026-10-22 deployment status note; neither extension was rescored.
 
 This inventory separates demonstrated failures from missing evidence, operating
 assumptions, and capabilities that have not been built or activated. A
@@ -18,6 +18,41 @@ An **evidence gap** means the
 available record cannot establish the claim. An **economic assumption** is a
 load or incentive premise rather than a code result. A **proposed capability**
 must not be described as shipped or authoritative.
+
+## Deployment status — 2026-10-22 { #deployment-status-20261022 }
+
+This note updates the deployment wording below; the September findings are unchanged.
+Rows and summaries that say a repair is "source-only" and "not activated or deployed"
+were true when written. They no longer describe deployment.
+
+Release `store-handle-20261021` runs on all six `postfiat-wan-devnet-2` validators from
+source `86706699`, deployed 2026-10-21 ([current state](../status/chain-state-current.md)).
+`git merge-base --is-ancestor <commit> 86706699` succeeds for every repair commit in the
+table, so each is included in the deployed source. All except `8644f0af` were already in
+`f60e9639`, the source of `combined-fastpay-20260925`, deployed 2026-09-25, and in
+`c93b2137`, the source of `combined-fastpay-20260928`, whose qualification passed the full
+workspace suite (84 groups, 1,487 passed, 0 failed).
+
+| Findings | Repair commit | In deployed source `86706699` |
+| --- | --- | --- |
+| EXE-01, EXE-02, EXE-03 | `e95efbdf` | Yes |
+| COB-01, COB-02 | `c9a61fcd` | Yes |
+| FIN-01, FIN-02 | `6ec35092` | Yes |
+| TYP-01, TYP-02 | `0a1216c3` | Yes |
+| SHD-01, SHD-02 | `33c8ce34` | Yes |
+| COB-03, NET-04, TYP-03, SHD-03 (P3 sweep) | `7095b393` | Yes |
+| VLK-01, VLK-02 | `090bd17e` | Yes |
+| CHO-01, CHO-02 | `21cf30f8` | Yes |
+| SWP-01 | `d679f8e8` | Yes |
+| NAV-03 | `e9ccdeda` | Yes |
+| SWX-01 | `043b9d69` | Yes |
+| RPC-01 | `15af691d` | Yes |
+| Consensus signing fix (SQ rows) | `bbb291ce` | Yes |
+| STO-07 | `8644f0af` | Yes; first deployed in this release |
+
+This note establishes inclusion in the deployed source only. Activation is not
+independently confirmed: no record here shows each repaired path running on the live
+network or any activation it depends on.
 
 ## Campaign findings
 
@@ -43,6 +78,8 @@ must not be described as shipped or authoritative.
 
 These 28 findings are from the [burn 3 campaign](qa-campaign-20260911.md).
 Consensus-affecting repairs remain source-only and were not activated or deployed.
+STO-07 was added later, from the 2026-10-19 G4 regression campaign.
+**2026-10-22:** these repairs are now in the deployed source; activation is not independently confirmed ([deployment status](#deployment-status-20261022)).
 
 | ID | Classification | Severity | Status | Source and reproduction |
 | --- | --- | --- | --- | --- |
@@ -52,6 +89,7 @@ Consensus-affecting repairs remain source-only and were not activated or deploye
 | STO-04 | Reproduced defect | P3 | Recorded, not fixed | [Storage review](storage-snapshots-review-20260911.md): legacy receipt compaction performs the same atomic state write twice, doubling I/O without improving crash safety. Comparison-only backend. |
 | STO-05 | Evidence gap | P2 | Closed 2026-10-02 on postfiat-wan-devnet-2 — existing record; source clarification `69e1f1ce` | [Storage review](storage-snapshots-review-20260911.md): the block-924 source repair predates the deployed base, but no post-repair signed fleet snapshot export establishes backup usability. Evidence: on 2026-09-28, with all six at height 1050 on `combined-fastpay-20260925` (source `f60e9639`, which contains `353156c3` and `69e1f1ce`), a finalized-checkpoint export from validator-1 was signed (manifest `a40d6a99…`), imported, checkpoint-verified and fully replayed to root `13d9e652…`; a copy with a changed signature was rejected ([qualification](https://github.com/postfiatorg/postfiatl1v2/blob/main/deployments/release-repair-20260928/README.md), [result](https://github.com/postfiatorg/postfiatl1v2/blob/main/deployments/release-repair-20260928/canary-backup/result.json)). Scope: one host's export of the six-way-agreed state. |
 | STO-06 | Reproduced defect | P1 | Fixed — `69e1f1ce` | [Storage review](storage-snapshots-review-20260911.md): a torn FastSwap WAL suffix remained after replay, so a subsequent synced vote record appended behind it could not be replayed after restart. |
+| STO-07 | Reproduced defect | P1 | Fixed — `8644f0af` (re-run PASS 2026-10-20, campaign report `d1e9b39c6498558da7c2bd3aa979ec2a71fd6cffd0a3c9abe376c513ebb0aac0`) | Campaign report `94188f3c…`, [G4 regression result](../plans/active/g4-regression-deployed-release-20261019.md#result-2026-10-19): since `f0013c29` the store handle lease reopens and closes the redb database on most lookups. Close cost grows with the database size, so disk writes for identical logical writes are 23× August's at height 50 and 78× at height 5,000. Fix 2026-10-20: one store open per consensus operation or round, validated pointer binding reused while the handle is open; database opens per validator in one six-validator round 126 → 8 (proposer 163 → 5) ([fix](../plans/active/g4-regression-deployed-release-20261019.md#fix-2026-10-20)). The G4 re-run on `8644f0af` passed: consensus 1.0261, wallet 1.0326; stage p95 back at August's; per-window disk writes 1.03 / 3.68 GB; zero stage database opens ([result](../plans/active/g4-regression-deployed-release-20261019.md#result-2026-10-20-attempt-3-after-the-fix)). The deployed `fastlane-cap-20261014` (`8bed9b90`) still has it until the next release. |
 | EXE-01 | Reproduced defect | P1 | Fixed — `e95efbdf`; consensus-affecting, source-only; not activated or deployed | [Execution review](execution-review-20260911.md): a repeated transaction generated duplicate receipt IDs eligible for certification but rejected at ordered commit, halting that height. |
 | EXE-02 | Reproduced defect | P2 | Fixed — `e95efbdf`; consensus-affecting, source-only; not activated or deployed | [Execution review](execution-review-20260911.md): ordered `OwnedDeposit` bypassed the 100,000-object cap and could commit object 100,001. |
 | EXE-03 | Reproduced defect | P2 | Fixed — `e95efbdf`; consensus-affecting, source-only; not activated or deployed | [Execution review](execution-review-20260911.md): validators could certify a state root whose serialized state file exceeded storage's 256 MiB limit and could not be persisted. |
@@ -79,6 +117,7 @@ Consensus-affecting repairs remain source-only and were not activated or deploye
 
 These 15 findings are from the [burn 4 campaign](qa-campaign-20260915.md).
 Consensus-affecting repairs remain source-only and were not activated or deployed.
+**2026-10-22:** these repairs are now in the deployed source; activation is not independently confirmed ([deployment status](#deployment-status-20261022)).
 
 | ID | Classification | Severity | Status | Source and reproduction |
 | --- | --- | --- | --- | --- |
@@ -106,6 +145,7 @@ recorded without repair, and SMG-07 was blocked by an out-of-scope dependency
 (repaired 2026-10-14; see its row).
 All five repair commits still have a full Rust suite verdict pending.
 Consensus-affecting repairs remain source-only and were not activated or deployed.
+**2026-10-22:** these repairs are now in the deployed source; activation is not independently confirmed ([deployment status](#deployment-status-20261022)).
 
 | ID | Classification | Severity | Status | Source and reproduction |
 | --- | --- | --- | --- | --- |
@@ -140,6 +180,7 @@ by the release candidate. All four repair commits retain a full Rust suite
 verdict pending. NAV-03 and SWX-01 are consensus-affecting: release-tip
 re-qualification is required before deployment; neither was deployed.
 The focused A5 review contributes four rows; its unreviewed ranges remain explicit.
+**2026-10-22:** NAV-03 and SWX-01 are now in the deployed source; activation is not independently confirmed ([deployment status](#deployment-status-20261022)).
 
 | ID | Classification | Severity | Status | Source and reproduction |
 | --- | --- | --- | --- | --- |
@@ -177,7 +218,7 @@ The source is the historical [2026-09-06 review](https://github.com/postfiatorg/
 | SCT-05 | Reproduced defect | P2 | Reproduced — fixed `acdbb1f2` | [Burn 2 reproduction](burn2-open-row-reproduction-20260910.md): a post-lock correction preserves the scored text while naming exclusive cross-process access and operation-scoped leases as the implemented mechanism. |
 | SCT-06 | Economic assumption | P2 | Needs a traffic campaign on postfiat-wan-devnet-2 | [Burn 2 reproduction](burn2-open-row-reproduction-20260910.md): sustained overlapping public traffic and observable writer-fairness measurements are required. Remaining need, not read-only (spends test PFT): about 2 h of concurrent transfers submitted through all six RPCs alongside continuous RPC reads, sampling each validator's `status.storage` transaction counters and `durable_commit_micros`, per-request latency, and `writer lease deadline exhausted` errors per host; about 3 h including setup and analysis. This lane can run it on this environment on request. It measures writer fairness under the chosen synthetic load, not public demand. |
 | SCT-07 | Evidence gap | P3 | Closed 2026-10-02 on postfiat-wan-devnet-2 | [Burn 2 reproduction](burn2-open-row-reproduction-20260910.md): fleet disk-capacity and growth telemetry is not exposed by the permitted ledger/status endpoints. Source used instead: the read-only preflight's free space on `/` per host plus the dated records of 2026-09-29 and 2026-10-01. Free space fell 0.10–0.36 GB per host over 24.7 h; the lowest is 17.00 GB on validator-0 ([check](#live-environment-check-20261002)). The ledger/status endpoints still expose no disk telemetry. |
-| SCT-08 | Evidence gap | P2 | Decided 2026-10-12 | [Burn 2 reproduction](burn2-open-row-reproduction-20260910.md). I authorized the evidence campaign (complete signed bindings, publisher-attested work digests, exclusions, admission facts, native registry-root binding) as a bounded read-only campaign of the operating lane; it is an item in the [next validator release plan](../plans/active/next-validator-release-plan-20261101.md#candidates). |
+| SCT-08 | Evidence gap | P2 | Decided 2026-10-12; campaign started 2026-10-23 | [Burn 2 reproduction](burn2-open-row-reproduction-20260910.md). I authorized the evidence campaign (complete signed bindings, publisher-attested work digests, exclusions, admission facts, native registry-root binding) as a bounded read-only campaign of the operating lane; it is an item in the [next validator release plan](../plans/active/next-validator-release-plan-20261101.md#candidates). [Campaign](sct08-evidence-campaign-20261023.md), 2026-10-23, on the signed 1123/1131/1137 archives. Item 5 PASS since `2a82b837`: the runner accepts and recomputes the native root `08a451e0…` from the signed 1137 export, and the 1137 re-run binds it. Item 4: the native reliability input is defined (vote records; until a release carries them the fact is "not available"), and the vote records are a candidate of the [next release](../plans/active/next-validator-release-plan-20261108.md#candidates). Items 1–3 cannot run here: they need operator-signed bindings (Post Fiat), Task Node work digests and publishing keys (Task Node maintainers), and the exclusion list (Post Fiat). |
 | SCT-09 | Proposed capability | P2 | Dispositioned by the locked V2 shadow successor; not promoted | The September 3 model-flag direction and Admission Policy V1 had different eligibility semantics and no selected versioned successor policy. The [V2 milestone](../plans/completed/tasknode-unl-amendment-v2-milestone.md) now implements that successor as `SHADOW_ONLY`; this is not live adoption. |
 | SCT-10 | Proposed capability | P2 | Needs operator decision | [Burn 2 reproduction](burn2-open-row-reproduction-20260910.md): independent operators and a separately authorized end-to-end rehearsal are prerequisites. |
 
@@ -271,24 +312,27 @@ Free space on `/` (GB), from the preflight and the dated
 
 ## Final disposition
 
-The inventory contains 141 unique rows, including 28 burn 3 findings (6 P1,
+**2026-10-22:** the deployment statements in this section predate release `store-handle-20261021`. Every consensus-affecting repair named here, the RPC supervisor repair and the signing fix are now in the deployed source; activation is not independently confirmed ([deployment status](#deployment-status-20261022)).
+
+The inventory contains 142 unique rows, including 28 burn 3 findings (6 P1,
 14 P2, 8 P3), 15 burn 4 findings (0 P1, 10 P2, 5 P3), 22 burn 5 findings
-(1 P1, 14 P2, 7 P3), and 15 burn 6 findings (0 P1, 9 P2, 6 P3).
+(1 P1, 14 P2, 7 P3), 15 burn 6 findings (0 P1, 9 P2, 6 P3), and one
+2026-10-19 G4 regression finding (STO-07, P1).
 Classification and severity describe what the cited evidence
 establishes; status describes the bounded disposition in that row, not a
 broader production claim.
 
 | Measure | Count |
 | --- | ---: |
-| Reproduced defects | 101 |
+| Reproduced defects | 102 |
 | Code-observed defects (burn 5–6 P3) | 13 |
 | Evidence gaps | 22 |
 | Economic assumptions | 1 |
 | Proposed capabilities | 4 |
-| P1 | 26 |
+| P1 | 27 |
 | P2 | 77 |
 | P3 | 38 |
-| Fixed | 108 |
+| Fixed | 109 |
 | Dispositioned | 16 |
 | Reproduced and retained (prior campaigns) | 5 |
 | Recorded, not fixed (burn 3–6 P3) | 1 |
@@ -391,7 +435,8 @@ or StakeHub write.
 | Burn 6 swap and settlement execution (SWX-) | 1 |
 | Burn 6 bridge workflows (BRW-) | 6 |
 | Burn 6 remaining node files (NOD-) | 4 |
-| **Total** | **141** |
+| 2026-10-19 G4 regression campaign (STO-07) | 1 |
+| **Total** | **142** |
 
 Campaign review and repair commits are recorded in the
 [campaign log](qa-campaign-20260910.md). The inventory preserves open design,

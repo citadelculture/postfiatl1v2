@@ -299,12 +299,17 @@ code; callers should convert UI decimal amounts before signing.
 ## Account History
 
 `account_tx` first uses the server-side bounded `account_tx` read when the
-endpoint supports it. That endpoint uses the node's auto-refreshed
-retained-history index when the index is current, including incremental
-ancestor-tip catch-up and disk-backed per-account shards, and falls back to
-the aggregate index / bounded retained-history scan when the disk index is
-absent or stale. The client falls back to the older bounded client-side scan
-against pre-upgrade endpoints that reject the method with `rpc_method_not_allowed`.
+endpoint supports it. That endpoint uses the node's retained-history index when
+the index is current, including incremental ancestor-tip catch-up and
+disk-backed per-account shards, and falls back to the aggregate index / bounded
+retained-history scan when the disk index is absent or stale. The client falls
+back to the older bounded client-side scan against pre-upgrade endpoints that
+reject the method with `rpc_method_not_allowed`.
+
+`AccountTxRow.memos` holds the `payment_v2` memo contents (hex fields plus
+UTF-8 `*_text` readings) and is `None` for other kinds. Shielded-withdrawal
+credits arrive as rows with `batch_kind == "shielded"` and
+`tx_role == "shielded_withdrawal"`; see `docs/rpc/account-history.md`.
 
 For operator/integration pulls across a height range, use the stdlib CLI:
 
@@ -326,7 +331,7 @@ fails when a window truncates unless `--allow-truncated` is explicitly set.
 The CLI now uses the same client-level `account_tx_history()` helper exposed to
 Python integrations. The helper resolves the current height when `to_height` is
 omitted, walks deterministic height windows, deduplicates rows by
-height/batch/transaction id, and reports whether the pull completed without
+height/batch/transaction id/role/fill index, and reports whether the pull completed without
 truncation or max-window exhaustion.
 
 `tx(tx_id)` uses the selected-block hot path by default. The client only sends

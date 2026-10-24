@@ -43,35 +43,46 @@ pub fn tx_finality(options: TxFinalityQueryOptions) -> io::Result<TxFinalityRepo
             .filter(|receipt| receipt.tx_id == tx_id)
             .cloned()
             .collect::<Vec<_>>();
-        let receipt = match matching_receipts.as_slice() {
-            [receipt] => receipt.clone(),
-            [] => {
-                return Err(tx_finality_transaction_not_found(&tx_id));
-            }
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("transaction `{tx_id}` has multiple receipts"),
-                ));
-            }
-        };
+        if matching_receipts.is_empty() {
+            return Err(tx_finality_transaction_not_found(&tx_id));
+        }
 
         let mut matches = Vec::new();
         for block in &blocks.blocks {
             for (index, receipt_id) in block.receipt_ids.iter().enumerate() {
                 if receipt_id == &tx_id {
-                    matches.push((block.clone(), index as u64));
+                    matches.push((block, index as u64));
                 }
             }
         }
+        // A retried governance amendment keeps its id, so it may be linked
+        // from several governance blocks: with one receipt per link
+        // (transactional store) or one terminal receipt (legacy log). `tx`
+        // then answers with the latest link and receipt.
+        let repeated_governance = matches.len() > 1
+            && matches
+                .iter()
+                .all(|(block, _)| block.header.batch_kind == BATCH_KIND_GOVERNANCE)
+            && (matching_receipts.len() == 1 || matching_receipts.len() == matches.len());
+        if matching_receipts.len() > 1 && !repeated_governance {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("transaction `{tx_id}` has multiple receipts"),
+            ));
+        }
+        let receipt = matching_receipts
+            .last()
+            .cloned()
+            .expect("at least one receipt");
         let (block, receipt_index) = match matches.as_slice() {
-            [(block, index)] => (block.clone(), *index),
+            [(block, index)] => ((*block).clone(), *index),
             [] => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("transaction `{tx_id}` receipt is not linked from any verified block"),
                 ));
             }
+            [.., (block, index)] if repeated_governance => ((*block).clone(), *index),
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -115,6 +126,7 @@ pub fn tx_finality(options: TxFinalityQueryOptions) -> io::Result<TxFinalityRepo
         };
 
     let proof_id = tx_finality_proof_id(&genesis, &receipt, receipt_index, &block)?;
+    let transaction_rows = tx_finality_transaction_rows(&store, &block, &receipt_log, &tx_id);
     Ok(TxFinalityReport {
         schema: "postfiat-tx-finality-v1".to_string(),
         proof_id,
@@ -132,7 +144,55 @@ pub fn tx_finality(options: TxFinalityQueryOptions) -> io::Result<TxFinalityRepo
         block_count,
         tip_hash,
         tip_state_root,
+        transaction_rows,
     })
+}
+
+/// The `account_tx` rows of `tx_id`, decoded from the archived batch of the
+/// block that finalized it. This is a read-only decoration of the finality
+/// report: any failure to read or decode the archived batch (for example a
+/// pruned payload) leaves the list empty instead of failing the lookup.
+fn tx_finality_transaction_rows(
+    store: &NodeStore,
+    block: &BlockRecord,
+    receipts: &[Receipt],
+    tx_id: &str,
+) -> Vec<AccountTxRow> {
+    if !account_tx_indexes_batch_kind(&block.header.batch_kind) {
+        return Vec::new();
+    }
+    let Ok(Some(archive_entry)) = read_archived_batch_for_block(store, block) else {
+        return Vec::new();
+    };
+    let block_receipt_ids = block
+        .receipt_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let receipt_by_tx = receipts
+        .iter()
+        .filter(|receipt| block_receipt_ids.contains(receipt.tx_id.as_str()))
+        .map(|receipt| (receipt.tx_id.as_str(), receipt))
+        .collect::<HashMap<_, _>>();
+    account_tx_rows_for_archived_block(block, &archive_entry, &receipt_by_tx)
+        .map(|rows| rows.into_iter().filter(|row| row.tx_id == tx_id).collect())
+        .unwrap_or_default()
+}
+
+fn read_archived_batch_for_block(
+    store: &NodeStore,
+    block: &BlockRecord,
+) -> io::Result<Option<BatchArchiveEntry>> {
+    if store.transactional_storage_active()? {
+        return store
+            .transactional_store()?
+            .archived_batch(&block.header.batch_kind, &block.header.batch_id)
+            .map_err(io::Error::from);
+    }
+    Ok(store
+        .read_batch_archive()?
+        .find(&block.header.batch_kind, &block.header.batch_id)
+        .cloned())
 }
 
 pub fn blocks(options: BlockQueryOptions) -> io::Result<Vec<BlockRecord>> {
@@ -169,6 +229,20 @@ pub fn account_tx(options: AccountTxQueryOptions) -> io::Result<AccountTxReport>
 
 const ACCOUNT_TX_DISK_INDEX_FILE: &str = "account_tx_index_meta.json";
 const ACCOUNT_TX_ACCOUNT_SHARDS_DIR: &str = "account_tx_accounts";
+// v2 rows carry `payment_v2` memo contents and shielded-withdrawal credits.
+// An index written with an older schema is unusable for reads (the archive
+// scan answers instead) and is never extended: the next
+// `account-tx-index-build` rebuilds it from the retained blocks, which is the
+// backfill for history indexed before v2.
+const ACCOUNT_TX_INDEX_SCHEMA: &str = "postfiat-account-tx-index-v2";
+const ACCOUNT_TX_DISK_INDEX_SCHEMA: &str = "postfiat-account-tx-disk-index-v2";
+const ACCOUNT_TX_ACCOUNT_SHARD_SCHEMA: &str = "postfiat-account-tx-account-shard-v2";
+/// `tx_role` of an `account_tx` row that credits a transparent account from a
+/// shielded pool.
+pub const ACCOUNT_TX_ROLE_SHIELDED_WITHDRAWAL: &str = "shielded_withdrawal";
+const ORCHARD_WITHDRAW_ACTION_KIND: &str = "orchard_withdraw_v1";
+const ASSET_ORCHARD_EGRESS_ACTION_KIND: &str = "asset_orchard_egress_v1";
+const ASSET_ORCHARD_PRIVATE_EGRESS_ACTION_KIND: &str = "asset_orchard_private_egress_v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct AccountTxDiskIndex {
@@ -214,6 +288,225 @@ pub fn rebuild_account_tx_index(
     let archive = store.read_batch_archive()?;
     let receipts = store.read_receipts()?;
     refresh_account_tx_index_after_ordered_commit(&store, &block_log, &archive, &receipts)
+}
+
+/// What the commit-time append did to the disk index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AccountTxIndexAppend {
+    /// No disk index exists yet (`account-tx-index-build` has not run).
+    NotIndexed,
+    /// The disk index already ends at this block (a replayed commit).
+    AlreadyCurrent,
+    /// The disk index does not end at this block's parent, so it is left
+    /// behind; `account_tx` answers from the archive scan until the build
+    /// catches it up.
+    Behind,
+    /// The block's rows were appended and the index now ends at this block.
+    Appended,
+}
+
+/// Appends one committed block to the history index: first the disk index
+/// (the touched account shards, then `account_tx_index_meta.json`), then the
+/// aggregate `account_tx_index.json`. Returns what happened to the disk index.
+///
+/// Ordering rule: the caller runs this only after the block, its archive entry
+/// and its receipts are durable (the transactional commit returned, or the
+/// ordered commit journal was applied and removed). Each index is extended only
+/// from the block's parent and is otherwise left as it is. A crash or error
+/// before a metadata write leaves that index at an older tip: reads see a stale
+/// tip and use the next source (disk index, aggregate, archive scan), later
+/// commits do not extend it, and `account-tx-index-build` repairs it.
+pub(crate) fn append_account_tx_index_after_commit(
+    store: &NodeStore,
+    genesis: &Genesis,
+    block: &BlockRecord,
+    archive_entry: &BatchArchiveEntry,
+    receipts: &[Receipt],
+) -> io::Result<AccountTxIndexAppend> {
+    let data_dir = store.data_dir();
+    if !account_tx_disk_index_path(data_dir).exists() && !account_tx_index_path(data_dir).exists() {
+        return Ok(AccountTxIndexAppend::NotIndexed);
+    }
+    let rows = account_tx_rows_for_committed_block(block, archive_entry, receipts)?;
+    let disk = append_account_tx_disk_index_after_commit(store, genesis, block, &rows)?;
+    append_account_tx_aggregate_index_after_commit(store, genesis, block, &rows)?;
+    Ok(disk)
+}
+
+/// The `account_tx` rows of one committed block, from the commit's own block,
+/// archive entry and receipts (never the full history).
+fn account_tx_rows_for_committed_block(
+    block: &BlockRecord,
+    archive_entry: &BatchArchiveEntry,
+    receipts: &[Receipt],
+) -> io::Result<Vec<AccountTxRow>> {
+    if !account_tx_indexes_batch_kind(&block.header.batch_kind) {
+        return Ok(Vec::new());
+    }
+    if archive_entry.batch_kind != block.header.batch_kind
+        || archive_entry.batch_id != block.header.batch_id
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "block {} archive entry does not match its batch",
+                block.header.height
+            ),
+        ));
+    }
+    // The block's own receipts, under the same repeated-id rule as the build:
+    // only governance blocks may repeat an id, and they have no rows.
+    let block_log = BlockLog {
+        blocks: vec![block.clone()],
+    };
+    let receipt_by_tx = receipt_by_tx_id(receipts, &block_log)?;
+    account_tx_rows_for_archived_block(block, archive_entry, &receipt_by_tx)
+}
+
+/// Extends the aggregate index by one block. The file holds every row, so this
+/// rewrites it whole (bounded by the retained history, not by the block).
+fn append_account_tx_aggregate_index_after_commit(
+    store: &NodeStore,
+    genesis: &Genesis,
+    block: &BlockRecord,
+    rows: &[AccountTxRow],
+) -> io::Result<AccountTxIndexAppend> {
+    let index_path = account_tx_index_path(store.data_dir());
+    let mut index = match read_account_tx_index_file(&index_path) {
+        Ok(index) => index,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(AccountTxIndexAppend::NotIndexed);
+        }
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+            return Ok(AccountTxIndexAppend::Behind);
+        }
+        Err(error) => return Err(error),
+    };
+    if index.tip_hash == block.header.block_hash {
+        return Ok(AccountTxIndexAppend::AlreadyCurrent);
+    }
+    if account_tx_index_matches_domain(&index, genesis).is_err()
+        || index.tip_hash != block.header.parent_hash
+    {
+        return Ok(AccountTxIndexAppend::Behind);
+    }
+    if account_tx_indexes_batch_kind(&block.header.batch_kind) {
+        index.indexed_from_height.get_or_insert(block.header.height);
+        index.indexed_to_height = Some(block.header.height);
+        index.indexed_block_count = index.indexed_block_count.saturating_add(1);
+        for row in rows {
+            index.indexed_row_count = index.indexed_row_count.saturating_add(1);
+            accounts_for_account_tx_index(&mut index, row.clone());
+        }
+    }
+    index.account_count = index.accounts.len() as u64;
+    index.tip_hash = block.header.block_hash.clone();
+    write_account_tx_index_file(&index_path, &index)?;
+    Ok(AccountTxIndexAppend::Appended)
+}
+
+/// Extends the disk index by one block: the touched account shards first,
+/// `account_tx_index_meta.json` last. Each touched shard is rewritten whole.
+fn append_account_tx_disk_index_after_commit(
+    store: &NodeStore,
+    genesis: &Genesis,
+    block: &BlockRecord,
+    rows: &[AccountTxRow],
+) -> io::Result<AccountTxIndexAppend> {
+    let meta_path = account_tx_disk_index_path(store.data_dir());
+    let mut disk_index = match read_account_tx_disk_index_file(&meta_path) {
+        Ok(index) => index,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(AccountTxIndexAppend::NotIndexed);
+        }
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+            return Ok(AccountTxIndexAppend::Behind);
+        }
+        Err(error) => return Err(error),
+    };
+    let block_hash = &block.header.block_hash;
+    if &disk_index.tip_hash == block_hash {
+        return Ok(AccountTxIndexAppend::AlreadyCurrent);
+    }
+    if account_tx_disk_index_matches_genesis_and_tip(
+        &disk_index,
+        genesis,
+        &block.header.parent_hash,
+    )
+    .is_err()
+    {
+        return Ok(AccountTxIndexAppend::Behind);
+    }
+    let indexed_kind = account_tx_indexes_batch_kind(&block.header.batch_kind);
+
+    let mut appended = BTreeMap::new();
+    for row in rows {
+        accounts_for_account_tx_index_map(&mut appended, row.clone());
+    }
+    let shards_dir = account_tx_account_shards_dir(store.data_dir());
+    let mut shards = Vec::with_capacity(appended.len());
+    for (address, new_rows) in appended {
+        let mut account_rows = match disk_index.accounts.get(&address) {
+            Some(entry) => {
+                let shard =
+                    read_account_tx_account_shard_file(&shards_dir.join(&entry.shard_file))?;
+                if account_tx_account_shard_matches(&shard, &disk_index, &address, entry).is_err()
+                {
+                    return Ok(AccountTxIndexAppend::Behind);
+                }
+                shard.rows
+            }
+            None => Vec::new(),
+        };
+        account_rows.extend(new_rows);
+        shards.push(AccountTxDiskAccountShard {
+            schema: ACCOUNT_TX_ACCOUNT_SHARD_SCHEMA.to_string(),
+            chain_id: disk_index.chain_id.clone(),
+            genesis_hash: disk_index.genesis_hash.clone(),
+            protocol_version: disk_index.protocol_version,
+            address,
+            tip_hash: block_hash.clone(),
+            row_count: account_rows.len() as u64,
+            rows: account_rows,
+        });
+    }
+    std::fs::create_dir_all(&shards_dir)?;
+    for shard in shards {
+        let shard_file = account_tx_account_shard_file(&shard.address);
+        write_account_tx_account_shard_file(&shards_dir.join(&shard_file), &shard)?;
+        disk_index.accounts.insert(
+            shard.address,
+            AccountTxDiskAccountEntry {
+                shard_file,
+                row_count: shard.row_count,
+                tip_hash: block_hash.clone(),
+            },
+        );
+    }
+    if indexed_kind {
+        disk_index
+            .indexed_from_height
+            .get_or_insert(block.header.height);
+        disk_index.indexed_to_height = Some(block.header.height);
+        disk_index.indexed_block_count = disk_index.indexed_block_count.saturating_add(1);
+        disk_index.indexed_row_count = disk_index
+            .indexed_row_count
+            .saturating_add(rows.len() as u64);
+    }
+    disk_index.account_count = disk_index.accounts.len() as u64;
+    disk_index.tip_hash = block_hash.clone();
+    write_account_tx_disk_index_file(&meta_path, &disk_index)?;
+    Ok(AccountTxIndexAppend::Appended)
+}
+
+/// Blocks committed after `tip_hash`, or `None` when `tip_hash` is not on the
+/// local chain.
+fn account_tx_index_lag_blocks(block_log: &BlockLog, tip_hash: &str) -> Option<u64> {
+    if tip_hash == block_log.tip_hash() {
+        return Some(0);
+    }
+    account_tx_index_extension_start(block_log, tip_hash)
+        .map(|start| (block_log.blocks.len() - start) as u64)
 }
 
 fn refresh_account_tx_index_after_ordered_commit(
@@ -267,7 +560,7 @@ fn extend_account_tx_index_after_ordered_commit(
 
     let mut touched_accounts = BTreeSet::new();
     if extension_start < block_log.blocks.len() {
-        let receipt_by_tx = receipt_by_tx_id(receipts)?;
+        let receipt_by_tx = receipt_by_tx_id(receipts, block_log)?;
         for block in &block_log.blocks[extension_start..] {
             append_account_tx_index_block(
                 &mut index,
@@ -304,13 +597,13 @@ fn append_account_tx_index_block(
     receipt_by_tx: &HashMap<&str, &Receipt>,
     touched_accounts: &mut BTreeSet<String>,
 ) -> io::Result<()> {
-    if block.header.batch_kind != "transparent" {
+    if !account_tx_indexes_batch_kind(&block.header.batch_kind) {
         return Ok(());
     }
     index.indexed_from_height.get_or_insert(block.header.height);
     index.indexed_to_height = Some(block.header.height);
     index.indexed_block_count = index.indexed_block_count.saturating_add(1);
-    for row in account_tx_rows_for_transparent_block(block, archive, receipt_by_tx)? {
+    for row in account_tx_rows_for_block(block, archive, receipt_by_tx)? {
         index.indexed_row_count = index.indexed_row_count.saturating_add(1);
         touched_accounts.insert(row.from_address.clone());
         touched_accounts.insert(row.to_address.clone());
@@ -325,26 +618,26 @@ fn build_account_tx_index(
     archive: &BatchArchive,
     receipts: &[Receipt],
 ) -> io::Result<AccountTxIndex> {
-    let receipt_by_tx = receipt_by_tx_id(receipts)?;
+    let receipt_by_tx = receipt_by_tx_id(receipts, block_log)?;
     let mut accounts: BTreeMap<String, Vec<AccountTxRow>> = BTreeMap::new();
     let mut indexed_row_count = 0_u64;
     let mut indexed_block_count = 0_u64;
     let mut indexed_from_height = None;
     let mut indexed_to_height = None;
     for block in &block_log.blocks {
-        if block.header.batch_kind != "transparent" {
+        if !account_tx_indexes_batch_kind(&block.header.batch_kind) {
             continue;
         }
         indexed_from_height.get_or_insert(block.header.height);
         indexed_to_height = Some(block.header.height);
         indexed_block_count = indexed_block_count.saturating_add(1);
-        for row in account_tx_rows_for_transparent_block(block, archive, &receipt_by_tx)? {
+        for row in account_tx_rows_for_block(block, archive, &receipt_by_tx)? {
             indexed_row_count = indexed_row_count.saturating_add(1);
             accounts_for_account_tx_index_map(&mut accounts, row);
         }
     }
     let index = AccountTxIndex {
-        schema: "postfiat-account-tx-index-v1".to_string(),
+        schema: ACCOUNT_TX_INDEX_SCHEMA.to_string(),
         chain_id: genesis.chain_id.clone(),
         genesis_hash: genesis_hash(genesis),
         protocol_version: genesis.protocol_version,
@@ -447,6 +740,7 @@ pub fn account_tx_index_status(
     let block_log = store.read_blocks()?;
     let index_path = account_tx_index_path(store.data_dir());
     let current_tip_hash = logical_tip_hash(&store, &block_log)?;
+    let current_tip_height = block_log.blocks.last().map(|block| block.header.height);
     let disk_status = account_tx_disk_index_status_fields(&store, &genesis, &block_log)?;
     match read_account_tx_index_file(&index_path) {
         Ok(index) => {
@@ -470,8 +764,14 @@ pub fn account_tx_index_status(
                 indexed_row_count: index.indexed_row_count,
                 account_count: index.account_count,
                 disk_account_shard_count: disk_status.account_shard_count,
+                index_lag_blocks: account_tx_index_lag_blocks(&block_log, &index.tip_hash),
                 tip_hash: index.tip_hash,
                 current_tip_hash,
+                current_tip_height,
+                disk_indexed_from_height: disk_status.indexed_from_height,
+                disk_indexed_to_height: disk_status.indexed_to_height,
+                disk_tip_hash: disk_status.tip_hash,
+                disk_index_lag_blocks: disk_status.lag_blocks,
             })
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(AccountTxIndexStatusReport {
@@ -493,8 +793,14 @@ pub fn account_tx_index_status(
             indexed_row_count: 0,
             account_count: 0,
             disk_account_shard_count: disk_status.account_shard_count,
+            index_lag_blocks: None,
             tip_hash: String::new(),
             current_tip_hash,
+            current_tip_height,
+            disk_indexed_from_height: disk_status.indexed_from_height,
+            disk_indexed_to_height: disk_status.indexed_to_height,
+            disk_tip_hash: disk_status.tip_hash,
+            disk_index_lag_blocks: disk_status.lag_blocks,
         }),
         Err(error) => Err(error),
     }
@@ -505,6 +811,10 @@ struct AccountTxDiskIndexStatusFields {
     usable: bool,
     reason: Option<String>,
     account_shard_count: u64,
+    indexed_from_height: Option<u64>,
+    indexed_to_height: Option<u64>,
+    tip_hash: String,
+    lag_blocks: Option<u64>,
 }
 
 fn account_tx_disk_index_status_fields(
@@ -520,6 +830,10 @@ fn account_tx_disk_index_status_fields(
                 usable: reason.is_none(),
                 reason,
                 account_shard_count: index.accounts.len() as u64,
+                indexed_from_height: index.indexed_from_height,
+                indexed_to_height: index.indexed_to_height,
+                lag_blocks: account_tx_index_lag_blocks(block_log, &index.tip_hash),
+                tip_hash: index.tip_hash,
             })
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -528,6 +842,10 @@ fn account_tx_disk_index_status_fields(
                 usable: false,
                 reason: Some("account_tx disk index file is absent".to_string()),
                 account_shard_count: 0,
+                indexed_from_height: None,
+                indexed_to_height: None,
+                tip_hash: String::new(),
+                lag_blocks: None,
             })
         }
         Err(error) if error.kind() == io::ErrorKind::InvalidData => {
@@ -536,6 +854,10 @@ fn account_tx_disk_index_status_fields(
                 usable: false,
                 reason: Some(error.to_string()),
                 account_shard_count: 0,
+                indexed_from_height: None,
+                indexed_to_height: None,
+                tip_hash: String::new(),
+                lag_blocks: None,
             })
         }
         Err(error) => Err(error),
@@ -551,7 +873,7 @@ fn account_tx_scan(
 ) -> io::Result<AccountTxReport> {
     let archive = store.read_batch_archive()?;
     let receipts = store.read_receipts()?;
-    let receipt_by_tx = receipt_by_tx_id(&receipts)?;
+    let receipt_by_tx = receipt_by_tx_id(&receipts, block_log)?;
 
     let mut block_indexes = block_log
         .blocks
@@ -596,11 +918,11 @@ fn account_tx_scan(
     }
     for block_index in scan_order {
         let block = &block_log.blocks[block_index];
-        if block.header.batch_kind != "transparent" {
+        if !account_tx_indexes_batch_kind(&block.header.batch_kind) {
             continue;
         }
         archive_lookup_count = archive_lookup_count.saturating_add(1);
-        let matching = account_tx_rows_for_transparent_block(block, &archive, &receipt_by_tx)?
+        let matching = account_tx_rows_for_block(block, &archive, &receipt_by_tx)?
             .into_iter()
             .filter(|row| row.from_address == options.address || row.to_address == options.address)
             .collect::<Vec<_>>();
@@ -707,7 +1029,7 @@ fn write_account_tx_disk_index(store: &NodeStore, index: &AccountTxIndex) -> io:
     for (address, rows) in &index.accounts {
         let shard_file = account_tx_account_shard_file(address);
         let shard = AccountTxDiskAccountShard {
-            schema: "postfiat-account-tx-account-shard-v1".to_string(),
+            schema: ACCOUNT_TX_ACCOUNT_SHARD_SCHEMA.to_string(),
             chain_id: index.chain_id.clone(),
             genesis_hash: index.genesis_hash.clone(),
             protocol_version: index.protocol_version,
@@ -727,7 +1049,7 @@ fn write_account_tx_disk_index(store: &NodeStore, index: &AccountTxIndex) -> io:
         );
     }
     let disk_index = AccountTxDiskIndex {
-        schema: "postfiat-account-tx-disk-index-v1".to_string(),
+        schema: ACCOUNT_TX_DISK_INDEX_SCHEMA.to_string(),
         chain_id: index.chain_id.clone(),
         genesis_hash: index.genesis_hash.clone(),
         protocol_version: index.protocol_version,
@@ -784,7 +1106,7 @@ fn write_account_tx_disk_index_incremental(
         };
         let shard_file = account_tx_account_shard_file(address);
         let shard = AccountTxDiskAccountShard {
-            schema: "postfiat-account-tx-account-shard-v1".to_string(),
+            schema: ACCOUNT_TX_ACCOUNT_SHARD_SCHEMA.to_string(),
             chain_id: index.chain_id.clone(),
             genesis_hash: index.genesis_hash.clone(),
             protocol_version: index.protocol_version,
@@ -811,7 +1133,7 @@ fn write_account_tx_disk_index_incremental(
         return write_account_tx_disk_index(store, index);
     }
     let disk_index = AccountTxDiskIndex {
-        schema: "postfiat-account-tx-disk-index-v1".to_string(),
+        schema: ACCOUNT_TX_DISK_INDEX_SCHEMA.to_string(),
         chain_id: index.chain_id.clone(),
         genesis_hash: index.genesis_hash.clone(),
         protocol_version: index.protocol_version,
@@ -854,7 +1176,7 @@ fn account_tx_account_shard_matches(
     address: &str,
     account: &AccountTxDiskAccountEntry,
 ) -> Result<(), String> {
-    if shard.schema != "postfiat-account-tx-account-shard-v1" {
+    if shard.schema != ACCOUNT_TX_ACCOUNT_SHARD_SCHEMA {
         return Err(format!(
             "unsupported account_tx account shard schema `{}`",
             shard.schema
@@ -883,38 +1205,289 @@ fn account_tx_account_shard_matches(
     Ok(())
 }
 
-fn receipt_by_tx_id(receipts: &[Receipt]) -> io::Result<HashMap<&str, &Receipt>> {
+/// Receipts by `tx_id` for the `account_tx` index and archive scan.
+///
+/// A `tx_id` is unique in the receipt log with one exception. A governance
+/// receipt's id is its amendment id (`execute_governance_batch_with_replay`),
+/// and a rejected governance operation may be retried under the same id in a
+/// later governance batch. The transactional store keeps one receipt per
+/// linking block (`receipts_in_block_order`), so that id repeats once per
+/// governance block (postfiat-wan-devnet-2: heights 64/66 and 940/941/945).
+/// Such a repeat is accepted only when every block linking the id is a
+/// governance block and the receipt count equals the link count; the map then
+/// holds the latest receipt, which no `account_tx` row reads (governance
+/// blocks have no rows). Every other repeat is refused as before.
+fn receipt_by_tx_id<'a>(
+    receipts: &'a [Receipt],
+    block_log: &BlockLog,
+) -> io::Result<HashMap<&'a str, &'a Receipt>> {
+    let duplicate = |tx_id: &str| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("receipt log contains duplicate tx_id `{tx_id}`"),
+        )
+    };
     let mut receipt_by_tx = HashMap::new();
+    let mut repeated = BTreeMap::<&str, usize>::new();
     for receipt in receipts {
         if receipt_by_tx
             .insert(receipt.tx_id.as_str(), receipt)
             .is_some()
         {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("receipt log contains duplicate tx_id `{}`", receipt.tx_id),
-            ));
+            *repeated.entry(receipt.tx_id.as_str()).or_insert(1) += 1;
+        }
+    }
+    if repeated.is_empty() {
+        return Ok(receipt_by_tx);
+    }
+    let mut governance_links = BTreeMap::<&str, usize>::new();
+    for block in &block_log.blocks {
+        for receipt_id in &block.receipt_ids {
+            let Some((tx_id, _)) = repeated.get_key_value(receipt_id.as_str()) else {
+                continue;
+            };
+            if block.header.batch_kind != BATCH_KIND_GOVERNANCE {
+                return Err(duplicate(tx_id));
+            }
+            *governance_links.entry(tx_id).or_default() += 1;
+        }
+    }
+    for (tx_id, count) in repeated {
+        if governance_links.get(tx_id) != Some(&count) {
+            return Err(duplicate(tx_id));
         }
     }
     Ok(receipt_by_tx)
 }
 
-fn account_tx_rows_for_transparent_block(
+/// Block kinds whose archived batches contribute `account_tx` rows: every
+/// transparent transaction, and the transparent credits of shielded
+/// withdrawals.
+fn account_tx_indexes_batch_kind(batch_kind: &str) -> bool {
+    matches!(batch_kind, BATCH_KIND_TRANSPARENT | BATCH_KIND_SHIELDED)
+}
+
+/// The `account_tx` rows of one block. The disk index, the index rebuild, the
+/// archive scan and `tx` all build rows through this function.
+fn account_tx_rows_for_block(
     block: &BlockRecord,
     archive: &BatchArchive,
     receipt_by_tx: &HashMap<&str, &Receipt>,
 ) -> io::Result<Vec<AccountTxRow>> {
+    if !account_tx_indexes_batch_kind(&block.header.batch_kind) {
+        return Ok(Vec::new());
+    }
     let archive_entry = archive
         .find(&block.header.batch_kind, &block.header.batch_id)
         .ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "block {} references missing transparent archive batch `{}`",
-                    block.header.height, block.header.batch_id
+                    "block {} references missing {} archive batch `{}`",
+                    block.header.height, block.header.batch_kind, block.header.batch_id
                 ),
             )
         })?;
+    account_tx_rows_for_archived_block(block, archive_entry, receipt_by_tx)
+}
+
+fn account_tx_rows_for_archived_block(
+    block: &BlockRecord,
+    archive_entry: &BatchArchiveEntry,
+    receipt_by_tx: &HashMap<&str, &Receipt>,
+) -> io::Result<Vec<AccountTxRow>> {
+    match block.header.batch_kind.as_str() {
+        BATCH_KIND_TRANSPARENT => {
+            account_tx_rows_for_transparent_batch(block, archive_entry, receipt_by_tx)
+        }
+        BATCH_KIND_SHIELDED => {
+            account_tx_rows_for_shielded_batch(block, archive_entry, receipt_by_tx)
+        }
+        _ => Ok(Vec::new()),
+    }
+}
+
+/// Minimal view of an archived shielded batch: only the action list, so the
+/// index never depends on decoding action kinds it does not index.
+#[derive(Deserialize)]
+struct ShieldedBatchActionsView {
+    #[serde(default)]
+    actions: Vec<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct OrchardActionPoolIdView {
+    pool_id: String,
+}
+
+struct ShieldedWithdrawalCredit {
+    transaction_kind: &'static str,
+    pool_id: String,
+    to: String,
+    amount: u64,
+    fee: u64,
+    asset_id: Option<String>,
+}
+
+/// Rows for shielded-pool exits that credit a transparent account: native PFT
+/// `orchard_withdraw_v1`, and issued-asset `asset_orchard_egress_v1` /
+/// `asset_orchard_private_egress_v1`. `transaction_index` is the action index,
+/// which is also the action's receipt index in the block.
+fn account_tx_rows_for_shielded_batch(
+    block: &BlockRecord,
+    archive_entry: &BatchArchiveEntry,
+    receipt_by_tx: &HashMap<&str, &Receipt>,
+) -> io::Result<Vec<AccountTxRow>> {
+    let batch: ShieldedBatchActionsView = parse_archived_payload(block, archive_entry)?;
+    let mut rows = Vec::new();
+    for (action_index, action) in batch.actions.iter().enumerate() {
+        let Some(credit) = shielded_withdrawal_credit(block, action_index, action)? else {
+            continue;
+        };
+        let tx_id = block.receipt_ids.get(action_index).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "block {} has no receipt id for shielded action {}",
+                    block.header.height, action_index
+                ),
+            )
+        })?;
+        let receipt = receipt_by_tx.get(tx_id.as_str()).copied();
+        rows.push(AccountTxRow {
+            tx_id: tx_id.clone(),
+            block_height: block.header.height,
+            batch_kind: block.header.batch_kind.clone(),
+            batch_id: block.header.batch_id.clone(),
+            transaction_index: action_index as u64,
+            transaction_kind: credit.transaction_kind.to_string(),
+            from_address: credit.pool_id,
+            to_address: credit.to,
+            amount: credit.amount,
+            fee: credit.fee,
+            sequence: 0,
+            memo_hash: None,
+            memo_count: None,
+            memo_bytes: None,
+            memos: None,
+            asset_id: credit.asset_id,
+            issuer: None,
+            trustline_authorized: None,
+            trustline_frozen: None,
+            nft_id: None,
+            nft_issuer_transfer_fee: None,
+            nft_collection_flags: None,
+            escrow_id: None,
+            offer_id: None,
+            tx_role: Some(ACCOUNT_TX_ROLE_SHIELDED_WITHDRAWAL.to_string()),
+            counterparty_offer_id: None,
+            fill_index: None,
+            condition_hash: None,
+            accepted: receipt.map(|receipt| receipt.accepted),
+            receipt_code: receipt.map(|receipt| receipt.code.clone()),
+        });
+    }
+    Ok(rows)
+}
+
+fn shielded_withdrawal_credit(
+    block: &BlockRecord,
+    action_index: usize,
+    action: &serde_json::Value,
+) -> io::Result<Option<ShieldedWithdrawalCredit>> {
+    fn decode<T: serde::de::DeserializeOwned>(
+        block: &BlockRecord,
+        action_index: usize,
+        action: &serde_json::Value,
+    ) -> io::Result<T> {
+        T::deserialize(action).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "block {} shielded action {action_index} payload parse failed: {error}",
+                    block.header.height
+                ),
+            )
+        })
+    }
+    let kind = action
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let credit = match kind {
+        ORCHARD_WITHDRAW_ACTION_KIND => {
+            let payload: OrchardWithdrawActionPayload = decode(block, action_index, action)?;
+            // Execution rejects an action whose JSON does not parse, so the
+            // default pool id only ever labels a rejected row.
+            let pool_id = serde_json::from_str::<OrchardActionPoolIdView>(&payload.action_json)
+                .map(|view| view.pool_id)
+                .unwrap_or_else(|_| ORCHARD_DEFAULT_POOL_ID.to_string());
+            ShieldedWithdrawalCredit {
+                transaction_kind: ORCHARD_WITHDRAW_ACTION_KIND,
+                pool_id,
+                to: payload.to,
+                amount: payload.amount,
+                fee: payload.fee,
+                asset_id: None,
+            }
+        }
+        ASSET_ORCHARD_EGRESS_ACTION_KIND => {
+            let payload: AssetOrchardEgressActionPayload = decode(block, action_index, action)?;
+            ShieldedWithdrawalCredit {
+                transaction_kind: ASSET_ORCHARD_EGRESS_ACTION_KIND,
+                pool_id: payload.pool_id,
+                to: payload.to,
+                amount: payload.amount,
+                fee: 0,
+                asset_id: Some(payload.asset_id),
+            }
+        }
+        ASSET_ORCHARD_PRIVATE_EGRESS_ACTION_KIND => {
+            let payload: AssetOrchardPrivateEgressActionPayload =
+                decode(block, action_index, action)?;
+            ShieldedWithdrawalCredit {
+                transaction_kind: ASSET_ORCHARD_PRIVATE_EGRESS_ACTION_KIND,
+                pool_id: payload.pool_id,
+                to: payload.to,
+                amount: payload.amount,
+                fee: payload.fee,
+                asset_id: Some(payload.asset_id),
+            }
+        }
+        _ => return Ok(None),
+    };
+    // A malformed recipient, pool or asset id can only come from an action
+    // that execution rejected with no balance effect; such a row could not be
+    // queried or validated, so it is not indexed.
+    let asset_id_ok = credit
+        .asset_id
+        .as_deref()
+        .is_none_or(|asset_id| is_lower_hex_of_len(asset_id, ISSUED_ASSET_ID_HEX_LEN));
+    if !asset_id_ok
+        || !account_tx_key_is_clean(&credit.to)
+        || !account_tx_key_is_clean(&credit.pool_id)
+    {
+        return Ok(None);
+    }
+    Ok(Some(credit))
+}
+
+fn account_tx_key_is_clean(value: &str) -> bool {
+    !value.is_empty()
+        && value == value.trim()
+        && !value.chars().any(char::is_control)
+        && value.len() <= MAX_TEXT_FIELD_BYTES
+}
+
+fn is_lower_hex_of_len(value: &str, len: usize) -> bool {
+    value.len() == len && value.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn account_tx_rows_for_transparent_batch(
+    block: &BlockRecord,
+    archive_entry: &BatchArchiveEntry,
+    receipt_by_tx: &HashMap<&str, &Receipt>,
+) -> io::Result<Vec<AccountTxRow>> {
     let batch: TransactionBatch = parse_archived_payload(block, archive_entry)?;
     let mut rows = Vec::new();
     for (transaction_index, transfer) in batch.transactions.iter().enumerate() {
@@ -954,6 +1527,7 @@ fn account_tx_rows_for_transparent_block(
             memo_hash: None,
             memo_count: None,
             memo_bytes: None,
+            memos: None,
             asset_id: None,
             issuer: None,
             trustline_authorized: None,
@@ -1009,6 +1583,7 @@ fn account_tx_rows_for_transparent_block(
             memo_hash: payment_v2_memo_hash(payment),
             memo_count: Some(unsigned.memos.len() as u64),
             memo_bytes: Some(unsigned.memo_bytes() as u64),
+            memos: Some(payment_v2_memo_views(payment)),
             asset_id: None,
             issuer: None,
             trustline_authorized: None,
@@ -1094,6 +1669,24 @@ fn account_tx_rows_for_transparent_block(
                 operation.amount,
                 Some(operation.asset_id.clone()),
                 Some(operation.issuer.clone()),
+                None,
+                None,
+            ),
+            AssetTransactionOperation::IssuedPaymentV2(operation) => (
+                operation.from.clone(),
+                operation.to.clone(),
+                operation.amount,
+                Some(operation.asset_id.clone()),
+                Some(operation.issuer.clone()),
+                None,
+                None,
+            ),
+            AssetTransactionOperation::AccountSet(operation) => (
+                unsigned.source.clone(),
+                operation.account.clone(),
+                0,
+                None,
+                None,
                 None,
                 None,
             ),
@@ -1527,6 +2120,14 @@ fn account_tx_rows_for_transparent_block(
                 None,
             ),
         };
+        let (memo_hash, memo_count, memo_bytes) = match &unsigned.operation {
+            AssetTransactionOperation::IssuedPaymentV2(operation) => (
+                payment_memos_hash(&operation.memos),
+                Some(operation.memos.len() as u64),
+                Some(operation.memo_bytes() as u64),
+            ),
+            _ => (None, None, None),
+        };
         let receipt = receipt_by_tx.get(tx_id.as_str()).copied();
         rows.push(AccountTxRow {
             tx_id: tx_id.clone(),
@@ -1540,9 +2141,13 @@ fn account_tx_rows_for_transparent_block(
             amount,
             fee: unsigned.fee,
             sequence: unsigned.sequence,
-            memo_hash: None,
-            memo_count: None,
-            memo_bytes: None,
+            memo_hash,
+            memo_count,
+            memo_bytes,
+            memos: match &unsigned.operation {
+                AssetTransactionOperation::IssuedPaymentV2(operation) => Some(payment_memo_views(&operation.memos)),
+                _ => None,
+            },
             asset_id,
             issuer,
             trustline_authorized,
@@ -1606,6 +2211,7 @@ fn account_tx_rows_for_transparent_block(
                 memo_hash: None,
                 memo_count: None,
                 memo_bytes: None,
+                memos: None,
                 asset_id: Some(leg.asset_id.clone()),
                 issuer: Some(leg.issuer.clone()),
                 trustline_authorized: None,
@@ -1631,6 +2237,7 @@ fn account_tx_rows_for_transparent_block(
             .saturating_add(batch.payments_v2.len())
             .saturating_add(batch.asset_transactions.len())
             .saturating_add(batch.atomic_swap_transactions.len())
+            .saturating_add(batch.fastlane_primary_transactions.len())
             .saturating_add(escrow_index);
         let unsigned = &transaction.unsigned;
         let expected_tx_id = escrow_transaction_tx_id(transaction);
@@ -1716,6 +2323,7 @@ fn account_tx_rows_for_transparent_block(
             memo_hash: None,
             memo_count: None,
             memo_bytes: None,
+            memos: None,
             asset_id,
             issuer: None,
             trustline_authorized: None,
@@ -1740,6 +2348,7 @@ fn account_tx_rows_for_transparent_block(
             .saturating_add(batch.payments_v2.len())
             .saturating_add(batch.asset_transactions.len())
             .saturating_add(batch.atomic_swap_transactions.len())
+            .saturating_add(batch.fastlane_primary_transactions.len())
             .saturating_add(batch.escrow_transactions.len())
             .saturating_add(nft_index);
         let unsigned = &transaction.unsigned;
@@ -1825,6 +2434,7 @@ fn account_tx_rows_for_transparent_block(
             memo_hash: None,
             memo_count: None,
             memo_bytes: None,
+            memos: None,
             asset_id: None,
             issuer,
             trustline_authorized: None,
@@ -1849,6 +2459,7 @@ fn account_tx_rows_for_transparent_block(
             .saturating_add(batch.payments_v2.len())
             .saturating_add(batch.asset_transactions.len())
             .saturating_add(batch.atomic_swap_transactions.len())
+            .saturating_add(batch.fastlane_primary_transactions.len())
             .saturating_add(batch.escrow_transactions.len())
             .saturating_add(batch.nft_transactions.len())
             .saturating_add(offer_index);
@@ -1923,6 +2534,7 @@ fn account_tx_rows_for_transparent_block(
             memo_hash: None,
             memo_count: None,
             memo_bytes: None,
+            memos: None,
             asset_id,
             issuer: None,
             trustline_authorized: None,
@@ -1958,6 +2570,7 @@ fn account_tx_rows_for_transparent_block(
                     memo_hash: None,
                     memo_count: None,
                     memo_bytes: None,
+                    memos: None,
                     asset_id: if fill.maker_sends_asset_id
                         == postfiat_execution::NATIVE_PFT_ESCROW_ASSET_ID
                     {
@@ -1987,11 +2600,17 @@ fn account_tx_rows_for_transparent_block(
 }
 
 fn payment_v2_memo_hash(payment: &SignedPaymentV2) -> Option<String> {
-    if payment.unsigned.memos.is_empty() {
+    payment_memos_hash(&payment.unsigned.memos)
+}
+
+/// Memo digest shared by `payment_v2` and `issued_payment_v2` account_tx rows,
+/// so the same memos yield the same `memo_hash` for native and issued assets.
+fn payment_memos_hash(memos: &[postfiat_types::PaymentMemo]) -> Option<String> {
+    if memos.is_empty() {
         return None;
     }
-    let mut bytes = format!("memo_count={}\n", payment.unsigned.memos.len()).into_bytes();
-    for (index, memo) in payment.unsigned.memos.iter().enumerate() {
+    let mut bytes = format!("memo_count={}\n", memos.len()).into_bytes();
+    for (index, memo) in memos.iter().enumerate() {
         bytes.extend_from_slice(
             format!(
                 "memo[{index}].type_bytes={}\nmemo[{index}].type={}\nmemo[{index}].format_bytes={}\nmemo[{index}].format={}\nmemo[{index}].data_bytes={}\nmemo[{index}].data={}\n",
@@ -2006,6 +2625,31 @@ fn payment_v2_memo_hash(payment: &SignedPaymentV2) -> Option<String> {
         );
     }
     Some(hash_hex("postfiat.payment_v2.memo.v1", &bytes))
+}
+
+fn payment_v2_memo_views(payment: &SignedPaymentV2) -> Vec<PaymentMemoView> {
+    payment_memo_views(&payment.unsigned.memos)
+}
+
+fn payment_memo_views(memos: &[postfiat_types::PaymentMemo]) -> Vec<PaymentMemoView> {
+    memos.iter()
+        .map(|memo| PaymentMemoView {
+            memo_type: memo.memo_type.clone(),
+            memo_format: memo.memo_format.clone(),
+            memo_data: memo.memo_data.clone(),
+            memo_type_text: memo_hex_utf8_text(&memo.memo_type),
+            memo_format_text: memo_hex_utf8_text(&memo.memo_format),
+            memo_data_text: memo_hex_utf8_text(&memo.memo_data),
+        })
+        .collect()
+}
+
+/// The UTF-8 reading of a hex memo field, when it is nonempty and valid UTF-8.
+fn memo_hex_utf8_text(hex: &str) -> Option<String> {
+    if hex.is_empty() {
+        return None;
+    }
+    String::from_utf8(hex_to_bytes(hex).ok()?).ok()
 }
 
 fn read_usable_account_tx_index(
@@ -2034,7 +2678,7 @@ fn account_tx_index_matches_chain(
 }
 
 fn account_tx_index_matches_domain(index: &AccountTxIndex, genesis: &Genesis) -> Result<(), String> {
-    if index.schema != "postfiat-account-tx-index-v1" {
+    if index.schema != ACCOUNT_TX_INDEX_SCHEMA {
         return Err(format!(
             "unsupported account_tx index schema `{}`",
             index.schema
@@ -2068,7 +2712,7 @@ fn account_tx_disk_index_matches_genesis_and_tip(
     genesis: &Genesis,
     current_tip_hash: &str,
 ) -> Result<(), String> {
-    if index.schema != "postfiat-account-tx-disk-index-v1" {
+    if index.schema != ACCOUNT_TX_DISK_INDEX_SCHEMA {
         return Err(format!(
             "unsupported account_tx disk index schema `{}`",
             index.schema
@@ -2108,7 +2752,7 @@ fn account_tx_disk_index_matches_domain(
     disk_index: &AccountTxDiskIndex,
     index: &AccountTxIndex,
 ) -> Result<(), String> {
-    if disk_index.schema != "postfiat-account-tx-disk-index-v1" {
+    if disk_index.schema != ACCOUNT_TX_DISK_INDEX_SCHEMA {
         return Err(format!(
             "unsupported account_tx disk index schema `{}`",
             disk_index.schema
@@ -2238,6 +2882,7 @@ pub fn create_block_vote_with_timings(
     let store = NodeStore::new(&options.data_dir);
     timings.store_init_ms = node_timing_elapsed_ms(stage_start);
     let legacy_work_before = store.work_counters();
+    let opens_before = postfiat_storage::transactional::transactional_open_counts();
     let transactional_work_store = (store.storage_backend_mode()?.is_transactional()
         && store.transactional_storage_configured()?)
     .then(|| store.transactional_store())
@@ -2279,7 +2924,11 @@ pub fn create_block_vote_with_timings(
         .zip(transactional_work_before)
         .map(|(transactional, before)| transactional.work_counters().saturating_delta(before));
     let legacy_work = legacy_work_delta(store.work_counters(), legacy_work_before);
-    vote.timings.storage_work = Some(storage_work_report(transactional_work, legacy_work));
+    vote.timings.storage_work = Some(storage_work_report(
+        transactional_work,
+        legacy_work,
+        opens_before,
+    ));
     Ok(vote)
 }
 

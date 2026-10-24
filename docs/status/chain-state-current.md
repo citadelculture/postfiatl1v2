@@ -1,8 +1,210 @@
 # PostFiat L1 Current State
 
-Updated: `2026-10-13T09:50:00Z` (Ethereum relays 28701 and 28702 run as systemd units); latest fleet observation `2026-10-13T09:45:09Z`
+Updated: `2026-10-23T10:40:00Z` (release `exchange-readiness-20261023` deployed to all six, blocks 1138–1143; account_tx v2 index built on all six; the three governed activation heights set to 1153 at blocks 1144–1146, tip 1153); latest fleet observation `2026-10-23T10:33Z`
 
 Status: **canonical operational-state reference**
+
+!!! success "2026-10-23: exchange-readiness release deployed to all six validators"
+
+    Release `exchange-readiness-20261023` runs on all six validators: source `6b1a0585` on branch
+    `release/exchange-readiness-20261023` (`main` `d9260e93`), executable
+    `4085ac70c7bb3c21b46cc67be8cb1bbb3556bfea9f49fbf6b128cdac2adcbef9`, signed manifest `210544a8…`
+    (publisher `pfc531e0…`). It is `store-handle-20261021` plus #138–#144, #49, their integration fixes
+    and the account history index fix: exchange history (memo contents, shielded withdrawals),
+    malformed recipients refused at RPC and mempool, and the governance-gated recipient-format,
+    rejected-fee and require-memo rules. It replaced `store-handle-20261021` (`eea96ba6…`) with
+    `scripts/postfiat-safe-rollout apply-next`, one validator at a time (validator-1 canary, then 0, 2,
+    3, 4, 5), 07:10:57–07:37:03Z.
+
+    Before (`06:31Z`): six on `store-handle-20261021` at height 1137, tip `18a4dc86…`, root
+    `1277c76c…`, mempools empty. Signed canary backup from validator-1 at 1137: manifest `3257115c…`,
+    re-imported, checkpoint verified, fully replayed to the same root, and the current-head exact replay
+    (`run_replay_evidence.py --signed-archive-dir`) PASS. After (`07:40Z`): all 12 validator and RPC
+    processes on `4085ac70…`, `deployment_manifest_verified=true` and build `6b1a0585` on every host,
+    RPC units with `--max-requests 100000` and `RestartSec=1`, height 1143, tip `7fef75aa…`, root
+    `8c3a32fd…`; `demo-preflight.py` READY (60 PASS). No divergence at any step.
+
+    Grants used: six devnet faucet grants of 1 PFT from the faucet account to the `testing` wallet
+    (StakeHub `pft faucet`), one after each apply, at heights 1138–1143 (proposers validator-4, 5, 0,
+    1, 2, 3). Each certified at view 0 with quorum 5 of 6 and the same block, tip and root on all six
+    (`blocks` RPC). The three governed activation heights were unset at the rollout; malformed recipients
+    are refused at RPC and mempool by the binary itself. The heights are set by governance below.
+
+    Account history index (sheet §7, 08:02–08:23Z): `account-tx-index-build` ran on all six, one host
+    at a time (validator-1 first, then 0, 2, 3, 4, 5). Only the host's RPC unit was stopped, for 11–31 s;
+    the validator units stayed active. The build took 7–15 s per host and produced a usable v2 index on
+    every host: range 1–1143, 1,105 blocks, 970 rows. `account_tx` for `testing` answers from the index
+    with today's grants. Six-way agreement at 1143 held before and after every host. Ordered commit does
+    not extend the index, so after the next block reads fall back to the archive scan until it is rebuilt
+    ([records](https://github.com/postfiatorg/postfiatl1v2/tree/release/exchange-readiness-20261023/deployments/exchange-readiness-20261023/observed/account-tx-index)).
+
+    Governed activation (sheet §8 and §8b, 08:38–10:34Z): each of the three rules was set by one
+    governance amendment with value **1153**, signed by the six validators with their key files.
+
+    - `rejected_tx_fee_activation_height`: block 1144, amendment `e4745af7…`, batch `3c2a18d7…`.
+    - `require_memo_activation_height`: block 1145, view 0, proposer validator-5, amendment `cdf4c13c…`.
+    - `recipient_format_activation_height`: block 1146, view 0, proposer validator-0, amendment `a3771fed…`.
+      It was submitted last and cannot be undone.
+
+    Block 1144 needed a view change. The view-0 round stalled at 08:40Z: proposer validator-4 timed out
+    reading validator-5's commit-phase reply, and a same-round retry was refused by the vote-safety rule.
+    The six validators then signed timeout votes, and the timeout certificate (6 of 6, quorum 5) moved
+    the round to view 1. There, proposer validator-5 re-proposed the locked block, `cee96283…`, root
+    `34ede112…`. Validators 0–4 committed it at 09:34Z.
+
+    Validator-5 itself did not apply the block, because the round's send to its own service was reset.
+    Its round held the store lease, and the transport service could not open the store. That
+    validator-5 send happens only without `--local-apply-before-certified-send`, which the 1145 and 1146
+    rounds then used. At 09:46Z the same certified block was re-sent from validator-4, and validator-5
+    applied it. A read-only health check found validator-5 normal, comparable to validator-4.
+
+    Seven 1 PFT faucet grants to `testing` then brought the chain to 1153 (blocks 1147–1153), each
+    certified identically on six. All three rules apply from block 1153.
+
+    Probes at 1153:
+
+    - recipient format: through validator-1's RPC, a 41-character recipient is refused with
+      `invalid_recipient_address` and the canonical address passes;
+    - fee claim and require-memo: read-only confirmations. The mempool dry-run refuses failing transfers,
+      and no account sets the flag.
+
+    After state (`10:30Z`): six on `4085ac70…` at 1153, tip `db8b87b6…`, root `7141956e…`, mempools
+    empty; `demo-preflight.py` READY. Validator-1's account_tx index was rebuilt to cover 1–1153, with its
+    RPC unit stopped for 11 s. Between 10:51 and 11:07Z validators 0, 2, 3, 4 and 5 were rebuilt the same
+    way, so all six serve `account_tx` from a usable v2 index for 1–1153. Each RPC unit was stopped for
+    11–27 s, with six-way agreement at 1153 before and after every host
+    ([records](https://github.com/postfiatorg/postfiatl1v2/tree/release/exchange-readiness-20261023/deployments/exchange-readiness-20261023/observed/account-tx-index/after-activation)).
+    Postponing a rule needs a later amendment of the same kind with a far height, and only works for
+    the fee-claim and require-memo rules
+    ([records](https://github.com/postfiatorg/postfiatl1v2/tree/release/exchange-readiness-20261023/deployments/exchange-readiness-20261023/observed/activation)).
+
+    Rollback: the `store-handle-20261021` executable and release directory stay on every host;
+    `rollback-one.sh` returns one validator to it with the data in place (before any index build on
+    that host; after one, the old executable ignores the v2 index). No activation record may be
+    submitted until all six run this release, and no validator may roll back after one is committed.
+    Records: [deployment README](https://github.com/postfiatorg/postfiatl1v2/blob/release/exchange-readiness-20261023/deployments/exchange-readiness-20261023/README.md),
+    [rollout record](https://github.com/postfiatorg/postfiatl1v2/blob/release/exchange-readiness-20261023/deployments/exchange-readiness-20261023/observed/rollout-record.json),
+    [after checks](https://github.com/postfiatorg/postfiatl1v2/blob/release/exchange-readiness-20261023/deployments/exchange-readiness-20261023/observed/after-checks.json).
+
+!!! success "2026-10-21: store-handle release deployed to all six validators"
+
+    Release `store-handle-20261021` runs on all six validators: source
+    `86706699` on branch `release/store-handle-20261021`, executable
+    `eea96ba6761ed223047d7781663100d34efe5641d36031bd50874bd9c8b41f36`,
+    signed manifest `8ce1da30…` (publisher `pfc531e0…`). It is
+    `fastlane-cap-20261014` plus the STO-07 store-handle fix (`8644f0af`: the
+    transactional store stays open for the life of a consensus operation), the
+    offline `fastswap-committee-migrate` command (`2737f080`, run below) and
+    the reviewed contributor merges. It replaced `fastlane-cap-20261014`
+    (`b1b3dbb1…`) with `scripts/postfiat-safe-rollout apply-next`, one validator
+    at a time (validator-1 canary, then 0, 2, 3, 4, 5), 11:15:17–11:38:16Z.
+
+    Before (`10:57:52Z`): six on `fastlane-cap-20261014` at height 1131, tip
+    `9b054f09…`, root `a12e7c5f…`, mempools empty. Signed canary backup from
+    validator-1 at 1131: manifest `df9b3847…`, re-imported, checkpoint verified
+    and fully replayed to the same root. After (`11:43:17Z`): all 12 validator
+    and RPC processes on `eea96ba6…`, `deployment_manifest_verified=true` and
+    build `86706699` on every host, RPC units with `--max-requests 100000` and
+    `RestartSec=1`, height 1137, tip `18a4dc86…`, root `1277c76c…`;
+    `demo-preflight.py` READY (60 PASS). No divergence at any step. The fix is
+    visible in the transport event logs: every batch the new executable
+    accepted reports `storage_work.database_opens=0`.
+
+    Grants used: six devnet faucet grants of 1 PFT from the faucet account to
+    the `testing` wallet (StakeHub `pft faucet`), one after each apply, at
+    heights 1132–1137 (proposers validator-4, 5, 0, 1, 2, 3). Each certified at
+    view 0 with quorum 5 of 6 and the same block, tip and root on all six
+    (`blocks` RPC). Total: 6 PFT plus 192 atoms of fees. Nothing else moved:
+    the A666 and BMNRC routes keep `authority_epoch` 1 and their hashes
+    (`57da3837…`, `b2817e68…`); neither issuer update has been submitted, and
+    the signing sheet's height-1131 preconditions no longer hold.
+
+    Rollback: the `fastlane-cap-20261014` executable and release directory stay
+    on every host. The per-validator path is `rollback-one.sh` (data in place,
+    verified by that executable first); the signed validator-1 backup at 1131 is
+    the fallback. Rollback was not needed. Records:
+    [deployment README](https://github.com/postfiatorg/postfiatl1v2/blob/release/store-handle-20261021/deployments/store-handle-20261021/README.md),
+    [rollout record](https://github.com/postfiatorg/postfiatl1v2/blob/release/store-handle-20261021/deployments/store-handle-20261021/observed/rollout-record.json).
+
+    FastSwap committee migration (sheet §7), 12:07–12:27Z: this release's
+    `fastswap-committee-migrate` moved each `fastswap-v1/` store from committee
+    epoch 1 to the activated epoch 2, one host at a time (validator-5, then
+    0–4; both units stopped, dry run, real run with a verified backup, units
+    started). All six validators now run the swap service at committee epoch 2,
+    root `72836827…`, `enabled: true`; `fastswap_checkpoint_status` answers.
+    validator-5 was not refused: its store never applied the epoch-1 fence or
+    anchor, but its replayed state equals the anchored drained state
+    (`355fe608…`), as its report notes; its service, unavailable before, now
+    opens. The fleet stayed at 1137 / `18a4dc86…` / `1277c76c…` with six-way
+    agreement after every host; `demo-preflight.py` READY (60 PASS). The routes
+    keep `authority_epoch` 1, so Ethereum checkpoint signing is unchanged.
+    Backups: `/var/lib/postfiat/fastswap-v1-epoch2-backup-validator-N`. Records:
+    [sheet §7](https://github.com/postfiatorg/postfiatl1v2/blob/release/store-handle-20261021/deployments/store-handle-20261021/DEPLOY-SHEET.md#7-fastswap-committee-migration-one-host-at-a-time--covered-by-the-operators-go-of-the-day),
+    [per-host reports](https://github.com/postfiatorg/postfiatl1v2/tree/release/store-handle-20261021/deployments/store-handle-20261021/observed/committee-migration).
+
+!!! success "2026-10-15: fastlane-cap release deployed; bridge committee epoch 2 active"
+
+    Release `fastlane-cap-20261014` runs on all six validators: source
+    `8bed9b90` on branch `release/fastlane-cap-20261014`, executable
+    `b1b3dbb150d3596577df3bb3fe145103d90988cf71558c4d34a035fe4bb44405`,
+    signed manifest `4f379c57…` (publisher `pfc531e0…`). It is
+    `signer-rotation-20261007` plus the 256 KiB `fastlane_primary_json` RPC cap
+    with per-operation finality receipt checks (`7f9d0d98`), the rustls 0.23.46
+    advisory fix (#123) and the reviewed contributor merges. It replaced
+    `signer-rotation-20261007` (`decaa411…`) with
+    `scripts/postfiat-safe-rollout apply-next`, one validator at a time
+    (validator-1 canary, then 0, 2, 3, 4, 5), 10:38:19–11:03:35Z.
+
+    Before (`10:19:51Z`): six on `signer-rotation-20261007` at height 1123,
+    tip `bafcc6ef…`, root `942d1fc2…`, mempools empty. Signed canary backup from
+    validator-1 at 1123: manifest `d957141e…`, re-imported, checkpoint verified
+    and fully replayed to the same root. After (`11:07:27Z`): all 12 validator
+    and RPC processes on `b1b3dbb1…`, `deployment_manifest_verified=true` on
+    every host, RPC units with `--max-requests 100000` and `RestartSec=1`,
+    height 1129, tip `41154d2c…`, root `053fb35c…`; `demo-preflight.py` READY
+    (60 PASS). No divergence at any step.
+
+    Grants used: six devnet faucet grants of 1 PFT from the faucet account to
+    the `testing` wallet (StakeHub `pft faucet`), one after each apply, at
+    heights 1124–1129 (proposers validator-2, 3, 4, 5, 0, 1). Each certified at
+    view 0 with quorum 5 of 6 and the same block, tip and root on all six
+    (`blocks` RPC). Total: 6 PFT plus 192 atoms of fees. Nothing else moved.
+
+    Rollback: the `signer-rotation-20261007` executable and release directory
+    stay on every host. The per-validator path is `rollback-one.sh` (data in
+    place, verified by that executable first); the signed validator-1 backup at
+    1123 is the fallback. Rollback was not needed. The 70,944 B anchor passes
+    the release's request validation offline; it was admitted live in sheet §7
+    (below). Records:
+    [deployment README](https://github.com/postfiatorg/postfiatl1v2/blob/release/fastlane-cap-20261014/deployments/fastlane-cap-20261014/README.md),
+    [rollout record](https://github.com/postfiatorg/postfiatl1v2/blob/release/fastlane-cap-20261014/deployments/fastlane-cap-20261014/observed/rollout-record.json).
+
+    Bridge half of the signer-group activation (sheet §7, 11:25–11:46Z), with a
+    state read before and after each step. Validators 0–4 gave fresh, identical
+    drained epoch-1 checkpoint votes (policy epoch 1 fenced, no previous
+    checkpoint). The `AnchorCheckpoint` (71,005 B, tx `f34dd1f5…`) was admitted
+    at height 1130 through validator-2 (block `4dafdfc8…`). `ActivateCommittee`
+    epoch 2 (root `72836827…`, six members with validator-5's current key,
+    quorum 5; 176,546 B, tx `2b2efa37…`), signed by validators 0–4 on their own
+    hosts, was admitted at 1131 through validator-3 (block `9b054f09…`). The
+    receipts are `fastlane_checkpoint_anchored` and `fastlane_control_applied` on
+    all six, and the RPC reported both as success. After (`11:45:37Z`): height
+    1131, tip `9b054f09…`, root `a12e7c5f…`, mempools empty, six-way agreement.
+    The A666 and BMNRC routes stay on `authority_epoch` 1 (root `a2eebcba…`),
+    so validators 0–4 still sign Ethereum checkpoints. The A666 update to
+    `authority_epoch` 2 is prepared unsigned (sha256 `24aa2e28…`) and awaits
+    the other lane's signature; BMNRC needs the same update from its issuer.
+    `fastswap_capabilities` still reports each validator's local FastSwap
+    committee (epoch 1, `enabled: false`); the local committee was not
+    switched. Records:
+    [sheet §7](https://github.com/postfiatorg/postfiatl1v2/blob/release/fastlane-cap-20261014/deployments/fastlane-cap-20261014/DEPLOY-SHEET.md#7-signer-group-activation-bridge-half),
+    [activation record](https://github.com/postfiatorg/postfiatl1v2/blob/release/fastlane-cap-20261014/deployments/fastlane-cap-20261014/observed/bridge-activation/bridge-activation-record.json),
+    [unsigned update](https://github.com/postfiatorg/postfiatl1v2/blob/release/fastlane-cap-20261014/deployments/fastlane-cap-20261014/observed/a666-bridge-policy-update.unsigned.json).
+
+    On 2026-10-21 the next release, `store-handle-20261021` (`main` at `86706699`,
+    executable `eea96ba6…`), which carries the STO-07 store-handle fix and the offline
+    `fastswap-committee-migrate`, was cut, qualified locally and deployed (2026-10-21
+    entry above; [release inputs](https://github.com/postfiatorg/postfiatl1v2/blob/release/store-handle-20261021/deployments/store-handle-20261021/README.md)).
 
 !!! success "2026-10-12: FastSwap store converted; FastPay committee epoch 2 installed; bridge committee unchanged"
 
@@ -35,10 +237,10 @@ Status: **canonical operational-state reference**
     height 1123, root `942d1fc2…`, with six-way agreement
     ([sheet §8](https://github.com/postfiatorg/postfiatl1v2/blob/release/signer-rotation-20261007/deployments/signer-rotation-20261007/DEPLOY-SHEET.md#8-signer-group-activation)).
 
-    On 2026-10-15 the next candidate, `fastlane-cap-20261014` (`main` at `8bed9b90`,
-    executable `b1b3dbb1…`), which admits the anchor and `ActivateCommittee`, was cut and
-    qualified locally; it is cut, not deployed
-    ([release inputs](https://github.com/postfiatorg/postfiatl1v2/blob/release/fastlane-cap-20261014/deployments/fastlane-cap-20261014/README.md)).
+    On 2026-10-15 the next release, `fastlane-cap-20261014` (`main` at `8bed9b90`,
+    executable `b1b3dbb1…`), which admits the anchor and `ActivateCommittee`, was cut,
+    qualified locally and deployed (2026-10-15 entry above;
+    [release inputs](https://github.com/postfiatorg/postfiatl1v2/blob/release/fastlane-cap-20261014/deployments/fastlane-cap-20261014/README.md)).
 
 !!! success "2026-10-09: signer-rotation release deployed to all six validators"
 
@@ -371,26 +573,32 @@ binary to the running services.
 
 !!! warning "Point-in-time evidence"
 
-    The latest all-six read-only RPC observation ran from
-    `2026-09-14T11:30:24Z` through `11:32:29Z`. The September 11 observation,
-    September 10 validator-0 diagnosis, and September 9 partial fleet capture
-    remain historical evidence. Every observation is point-in-time evidence,
-    not a real-time query now.
+    The latest recorded fleet state is from the 2026-10-21 store-handle
+    rollout and FastSwap committee migration (entries at the top of this
+    page): all six validators at height 1137, tip `18a4dc86…`, root
+    `1277c76c…`, with six-way agreement after every host and
+    `demo-preflight.py` READY (60 PASS). The latest fleet observation is
+    `2026-10-21T12:30:55Z`. The September and August observations below remain
+    historical evidence. Every observation is point-in-time evidence, not a
+    real-time query now.
 
 ## Operational summary
 
 | Plane | Recorded state | Exact identifier | Observed or updated at | Evidence and freshness |
 | --- | --- | --- | --- | --- |
-| Validator-0 RPC diagnosis | The September 9 timeouts were an exhausted 10,000-connection accept budget combined with a still-active keep-alive connection. An out-of-campaign restart restored responses but did not repair the recurrence condition. | Affected event sequence ended at request index 10,000; current process had accepted 3,404 connections versus 121–124 on each peer. | `2026-09-10T10:24:20Z`–`10:40:22Z` | Read-only RPC, event-log, journal, socket, process, and sysstat inspection. Diagnosis only; no restart or write. |
-| Running devnet, latest read-only observation | All six answered all three health reads and agreed at height 1020 with empty mempools; validator-2 answered on retry after one timeout. This is zero blocks beyond September 11. | Chain `postfiat-wan-devnet-2`; genesis `ce22ca8c…e90a9`; tip `9d02b8ee…b1768feb`; state `587c6526…d39bead6` on all six. | `2026-09-14T11:30:24Z`–`11:32:29Z` | Authenticated SSH forwarding to loopback RPC plus read-only process identity; point in time. |
-| Deployed runtime, latest identity | All 12 validator and RPC service processes are active/running from one release and one executable hash. All four PostFiat services on each host entered active on September 11 in a rolling restart caused by Ubuntu's unattended security upgrade of glibc and Python (`needrestart`; see the 2026-09-23 note); no host reboot or deployment was observed. Validator-0 RPC's latest completed event index was 5,655 of 10,000. | Release `a666-source-route-20260907`; node SHA-256 `57b0f4d1d42d66878d7dbb8c33919c7fa0f87c6cc1a4b9cc1a85d75b634eec83`. | `2026-09-14`, event tail at `11:31:36Z` | Read-only systemd and `/proc` executable SHA-256 checks on all six hosts; validator-0 event-log tail and earlier operator reboot/journal checks. |
-| Running devnet, historical 2026-08-30 observation | Six validators converged at height 924 with empty mempools after validator-1 was rolled back from the failed storage canary; all validator, RPC, and advisory shadow services were active. | Chain `postfiat-wan-devnet-2`; genesis `ce22ca8c…e90a9`; tip `ebeb0e1e…a7649fbef`; state `0854bc47…1ee6f413e`. | `2026-08-30T23:00:24Z`–`23:00:39Z` | Authenticated post-rollback fleet observation; point in time, not a current network query. |
+| Running devnet, latest recorded state | All six validators agree at height 1153. Blocks 1138–1143 are the rollout's faucet grants; 1144–1146 are the three activation records (1144 at view 1 after a view change); 1147–1153 are faucet grants up to the activation height. `demo-preflight.py` reported READY. | Chain `postfiat-wan-devnet-2`; genesis `ce22ca8c…e90a9`; tip `db8b87b6…`; root `7141956e…` on all six. | `2026-10-23T10:30Z` | 2026-10-23 entry above; [activation records](https://github.com/postfiatorg/postfiatl1v2/tree/release/exchange-readiness-20261023/deployments/exchange-readiness-20261023/observed/activation). Point in time. |
+| Deployed runtime | Release `exchange-readiness-20261023` on all six validators: all 12 validator and RPC processes on one executable, `deployment_manifest_verified=true` and build `6b1a0585` on every host, RPC units with `--max-requests 100000` and `RestartSec=1`. Rolled out one validator at a time with `scripts/postfiat-safe-rollout apply-next` (validator-1 canary, then 0, 2, 3, 4, 5); rollback was not needed. Governed activation heights `recipient_format`, `rejected_tx_fee` and `require_memo` all 1153 (blocks 1144–1146); `account_tx` v2 index built on all six (2026-10-23, range 1–1143) and rebuilt on all six after the activation (range 1–1153). | Source `6b1a0585`; executable `4085ac70c7bb3c21b46cc67be8cb1bbb3556bfea9f49fbf6b128cdac2adcbef9`; signed manifest `210544a8…`. | Rollout `2026-10-23T07:10:57Z`–`07:37:03Z`; after-state `07:40Z` | [Deployment README](https://github.com/postfiatorg/postfiatl1v2/blob/release/exchange-readiness-20261023/deployments/exchange-readiness-20261023/README.md) and the rollout record. The previous release, `store-handle-20261021`, stays on every host for rollback. |
+| Storage | Transactional `redb` storage has been the live store since height 930 (2026-08-31). This release carries the STO-07 store-handle fix (`8644f0af`); every batch the new executable accepted reports `storage_work.database_opens=0`. Storage is `OFFLINE QUALIFIED` (2026-10-23, packet-r3 `357f06ee…`); that is neither `CLONE QUALIFIED` nor a deployment decision. | Activation height 930; deployed binary `eea96ba6…` | 2026-10-21 deployment; 2026-10-23 storage note | [Storage-scaling implementation boundary](#storage-scaling-implementation-boundary) and the [storage milestone](../plans/completed/storage-scaling-milestone.md). The August `10dd9f20` canary and its rollback are in the [canary rollback report](../postmortems/devnet-storage-live-canary-rollback-2026-08-30.md). |
+| Swap and bridge committees | FastSwap committee epoch 2 on all six (`enabled: true`), migrated 2026-10-21. Bridge committee epoch 2 activated at height 1131 on 2026-10-15. The A666 and BMNRC routes stay on `authority_epoch` 1, so validators 0–4 still sign Ethereum checkpoints; neither issuer route update has been submitted. FastPay committee epoch 2 was installed at height 1123 for orders 10001–19990. | Epoch-2 committee root `72836827…`; route authority root `a2eebcba…` | 2026-10-21 | 2026-10-21, 2026-10-15 and 2026-10-12 entries above. |
 | Validator-trust authority | Cobalt remains active for validator-registry and trust-graph ratification. The final signed drill rollback committed at 922, return to Cobalt at 923, and legitimate validator-5 rotation at 924. Consensus v2 remains block finality. | Registry root `08a451e0…2b9b1d`; trust root `89f18aef…08f0307`; ratification anchor sequence 2, ID `5eada38d…c21153c8`. | Accepted history through height 924; fleet-audited through `2026-08-30T23:00:39Z`. | The recovery probe found authority mode 1 and identical registry/trust roots on all six. |
-| Deployed runtime | Every validator uses the pre-storage node binary again; every validator, RPC, and shadow service is active. Validator-1 briefly ran successor transport while its RPC failed, then returned to the signed `8cc7d15e` deployment. | Node SHA-256 `d5e5ef630155e61b001b84edb404a4def7d29a9205f23d33d2ad9c37c2696caf`; stopped candidate `0cc664a3…ad4183` is inactive. | `2026-08-30T23:00:24Z`–`23:00:39Z` | Direct process, binary, status, service, signed-unit, and post-rollback storage comparisons. |
-| Storage rollout | `d0ae79f3` failed height-925 continuation. Successor `10dd9f20` fixed that defect and passed the old G6 runner, but is **not deployment-qualified and must not deploy**: the runner omitted the live concurrent transport/RPC topology. The validator-1 canary hit an exclusive `redb` lock and required exact data-plus-binary rollback. | Successor `10dd9f20`; binary `0cc664a3…ad4183`; reason `TRANSACTIONAL_DATABASE_MULTI_PROCESS_LOCK_CONFLICT`. | Canary stopped and rollback verified through `2026-08-30T23:00:39Z`. | [Canary rollback report](../postmortems/devnet-storage-live-canary-rollback-2026-08-30.md) and `benchmarks/storage-scaling/devnet-rollout/canary-rollback-20260830.json`. No block, governance, Cobalt, or storage activation occurred; Z1 did not start. |
-| Repository | `main` contains the deployed lineage, Cobalt evidence, the registry-history repair, and the undeployed transactional storage candidate. Repository descendants after `8cc7d15e` are not installed on the fleet. | Current local source `10dd9f20`; candidate binary `0cc664a3…ad4183`; old G6 `PASS` invalidated by the live topology gap. | `2026-08-30T23:00:39Z` | Repair requires one authoritative transactional writer and a replacement gate using the exact signed systemd topology plus exact deployed-binary/data rollback; use `git rev-parse HEAD` for the checkout. |
+| Repository | The deployed source is `6b1a0585` on `release/exchange-readiness-20261023`; its `crates/` and `Cargo.lock` equal `main` `d9260e93`. A later `main` commit is not deployed until a fleet receipt binds its source and binary to the running services. | Deployed source `6b1a0585`; use `git rev-parse HEAD` for the checkout. | 2026-10-23 | Release records above. |
 | Adversarial campaign | E1–E6 passed their locked gates. The consolidated decision is `KEEP_ACTIVE` for Cobalt's bounded controlled-devnet validator-trust role. | E1 `495a59a2…4dfcd90`; E2 `8742d960…d7cba3`; E3 `9302b355…40b600`; E4 `93ba3db0…c14508`; E5 `0695284a…f3b3db`; E6 `ee6848f5…121be0b`. | Completed 2026-08-26 | [Completed milestone](../plans/completed/cobalt-adversarial-verification-milestone.md) and [results](../governance/cobalt-adversarial-verification-results.md). |
 | Operator boundary | The campaign proves protocol capability, not operator decentralization. Current proposals and authorizations originate from Foundation-administered validators. | E6 decision: independent-operator proposal path remains a mandatory follow-on milestone. | 2026-08-26 | No independent operators were recruited and no mainnet authority was granted. |
+
+Earlier summary values (the 2026-08-30 to 2026-09-14 observations, the
+validator-0 RPC diagnosis and the August deployed binaries) are kept in
+[Last observed devnet values](#last-observed-devnet-values) and the dated
+entries above.
 
 ## Baseline latency versus chain height
 
@@ -437,8 +645,12 @@ old G6 service model started only transport processes. On the live host,
 transport retained the transactional database lock and RPC could not start.
 The canary was rolled back, and no current candidate is deployment-eligible.
 Nothing in this section proves deployment. See the
-[active milestone](../plans/active/storage-scaling-milestone.md) and
+[active milestone](../plans/completed/storage-scaling-milestone.md) and
 [development evidence](https://github.com/postfiatorg/postfiatl1v2/tree/main/benchmarks/storage-scaling).
+
+**2026-10-22, storage qualification packet:** not assembled, so storage is not offline qualified (state SELECTED). Both exact replays passed with the deployed `store-handle-20261021` binary (`eea96ba6…`, source `86706699`): height 1123 from the signed canary archive, and height 924 from the custody copy. The 2026-10-20 G1, G2 and G4 evidence, however, is on `8644f0af` (binary `d1799edb…`). The packet verifier accepts one source and binary for all of it, still requires the lost height-915 archive, and needs a six-clone migration report for that candidate, which does not exist. The gap list is in [storage G5](../plans/completed/storage-scaling-milestone.md#g5-offline-qualification-packet). The same day, G1, G2 and G4 were re-run on the deployed binary `eea96ba6…` and PASS (consensus ratio 1.048, wallet 1.064; [attempt 4](../plans/active/g4-regression-deployed-release-20261019.md#result-2026-10-22-attempt-4-deployed-binary)), so that evidence and the replays now share one source and binary.
+
+**2026-10-23, storage qualification packet:** assembled, and the offline verifier passes. Storage is still not offline qualified (state SELECTED). The six-clone migration rehearsal passed on the deployed binary `eea96ba6…` (source `86706699`, work server only). It used scratch copies of the six height-924 directories and ran from 924 through activation at 932 to 934. All six converged, and the originals' tree hashes were unchanged. The packet binds that rehearsal, G1/G2/G4 of attempt 4 and the 924 and 1123 replay receipts. After the reviewer's changes (`4d8d2a72`), packet-r3 (checksum manifest `357f06ee…`, verifier output `e4fba47e…`, work server) verifies offline, so storage is **OFFLINE QUALIFIED** as of 2026-10-23. This supersedes the SELECTED state and open boxes stated in this paragraph, and it is neither `CLONE QUALIFIED` nor a deployment decision. Five storage-milestone boxes remain before the label; they are listed in [storage G5](../plans/completed/storage-scaling-milestone.md#g5-offline-qualification-packet).
 
 ## Last observed devnet values
 
@@ -932,3 +1144,51 @@ transaction was sent. The release preflight `demo-preflight.py` then reported
 ([record](https://github.com/postfiatorg/postfiatl1v2/blob/release/signer-rotation-20261007/deployments/signer-rotation-20261007/observed/ethereum-relays-20261013.json)).
 The 28703 unit on all six hosts and validator-1's 28701 unit are still transient
 and do not survive a reboot.
+
+## 2026-10-16: archive relay runs as a systemd unit
+
+At 10:45–10:47Z the transient `systemd-run` relay units were replaced by enabled
+units in `/etc/systemd/system`, modelled on `navcoin-ethereum-rpc-28702.service`
+with the same command line: `127.0.0.1:28703` (drpc) on all six hosts moved from
+`navcoin-ethereum-archive-rpc-20260907.service` to
+`navcoin-ethereum-rpc-28703.service`, and validator-1's `127.0.0.1:28701`
+(publicnode) moved from `navcoin-ethereum-rpc-proxy-20260907.service` to
+`navcoin-ethereum-rpc-28701.service`. Each port was free for about one second
+between stop and start; `eth_blockNumber` returned HTTP 200 through it afterwards.
+Validator and RPC PIDs and the other lane's `navcoin-proof-watchdog@` user units
+(validators 0 and 3, all paused or `pause_retry`) did not change, and no
+transaction was sent. All relays on all six hosts now restart on boot. The
+release preflight `demo-preflight.py` (10:46:48Z) reported **NOT READY**: 54
+PASS, 0 ATTENTION, 6 FAIL, six-way agreement at height 1131, root `a12e7c5f…`.
+Every relay row passed; the six FAIL rows are its `units` check, which still names
+the removed transient unit `navcoin-ethereum-archive-rpc-20260907.service`
+([record](https://github.com/postfiatorg/postfiatl1v2/blob/release/fastlane-cap-20261014/deployments/fastlane-cap-20261014/observed/ethereum-relays-20261016.json)).
+That NOT READY was only the stale unit name in the scripts, not the fleet: with
+`demo-preflight.py` and `observe-fleet.py` checking
+`navcoin-ethereum-rpc-28703.service` (release `6b4fa4b0`), the preflight at
+10:55:03Z reported **READY**: 60 PASS, 0 ATTENTION, 0 FAIL, six-way agreement at
+height 1131, root `a12e7c5f…`
+([preflight](https://github.com/postfiatorg/postfiatl1v2/blob/6b4fa4b0596fecbdad663d9cddf902ae7b56d8b7/deployments/fastlane-cap-20261014/observed/demo-preflight-20261016.json),
+[fleet observation](https://github.com/postfiatorg/postfiatl1v2/blob/6b4fa4b0596fecbdad663d9cddf902ae7b56d8b7/deployments/fastlane-cap-20261014/observed/observe-fleet-20261016.json)
+at 10:56:22Z, PASS).
+
+## 2026-10-20: issuer signing window
+
+The founder signs the two issuer bridge policy updates on his own host. The window is 2026-10-20 12:00–16:00 UTC, A666 first, then BMNRC. The files are the [A666 update](https://github.com/postfiatorg/postfiatl1v2/blob/30c6dcd647ae1efe5b52061fa0321e21946e7a0b/deployments/fastlane-cap-20261014/observed/a666-bridge-policy-update.unsigned.json) (`24aa2e28…`) and the [BMNRC update](https://github.com/postfiatorg/postfiatl1v2/blob/30c6dcd647ae1efe5b52061fa0321e21946e7a0b/deployments/fastlane-cap-20261014/observed/bmnrc-bridge-policy-update.unsigned.json) (`5179d6f7…`), both to `authority_epoch` 2, root `72836827…`. The steps are in the [signing sheet](https://github.com/postfiatorg/postfiatl1v2/blob/30c6dcd647ae1efe5b52061fa0321e21946e7a0b/deployments/fastlane-cap-20261014/ISSUER-SIGNING-SHEET-20261020.md). At 10:13Z no transaction had been sent and the chain was at height 1131.
+
+At 10:25Z the other lane's `navcoin-proof-watchdog@` user units, which watched only loopback forks, were stopped and disabled on validator-0 (3) and validator-3 (14), with the validator and RPC PIDs unchanged and the state and config files kept ([record](https://github.com/postfiatorg/postfiatl1v2/blob/819918d2b0cd5798f365bd1c6341537f11b64ead/deployments/fastlane-cap-20261014/observed/watchdog-units-stopped-20261020.json)).
+
+The STO-07 fix (`8644f0af`) is on main, and the G4 re-run on the work server qualifies it: **PASS**, report `d1e9b39c…0ac0`, consensus ratio 1.0261, wallet 1.0326, stage p95 back at the August level ([result](../plans/active/g4-regression-deployed-release-20261019.md#result-2026-10-20-attempt-3-after-the-fix)). The devnet still runs `fastlane-cap-20261014` (`8bed9b90`), which does not have the fix, at height 1131 (last observed). The fix ships with the [next release](../plans/active/next-validator-release-plan-20261101.md#candidates). The re-run made no validator-host contact and sent no transaction, and nothing changed on the validators.
+
+## 2026-10-19: G4 regression campaign (work server only)
+
+The devnet was not touched: there was no validator-host contact and no transaction. The G4
+regression run on candidate `29824ed7` reported **PUBLIC TESTNET BLOCKED**
+([result](../plans/active/g4-regression-deployed-release-20261019.md#result-2026-10-19),
+report `94188f3c…`). Since `f0013c29`, the store handle lease reopens and closes the redb
+database on most lookups. Round stages are several times slower than in August, and
+certified sends grow with height
+([STO-07](../review/defect-inventory-20260910.md)). The devnet runs this code (`8bed9b90`),
+so the cost is real there too. The chain is idle at height 1131, though, and nothing changes
+on the validators today. The fix and one G4 re-run are in the
+[next release plan](../plans/active/next-validator-release-plan-20261101.md#candidates).

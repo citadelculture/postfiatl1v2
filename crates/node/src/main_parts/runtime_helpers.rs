@@ -725,9 +725,12 @@ fn print_usage() {
   postfiat-node ratify-orchard-pool-pause [--data-dir PATH] --validators CSV [--support CSV] --state paused|resumed [--activation-height H] [--veto-until-height H] [--paused] --amendment-file PATH
   postfiat-node ratify-atomic-swap-pause [--data-dir PATH] --validators CSV [--support CSV] --state paused|resumed [--activation-height H] [--veto-until-height H] [--paused] --amendment-file PATH
   postfiat-node ratify-atomic-swap-activation-height [--data-dir PATH] --validators CSV [--support CSV] --height H [--activation-height H] [--veto-until-height H] [--paused] --amendment-file PATH
+  postfiat-node ratify-rejected-tx-fee-activation-height [--data-dir PATH] --validators CSV [--support CSV] --height H [--activation-height H] [--veto-until-height H] [--paused] --amendment-file PATH
+  postfiat-node ratify-require-memo-activation-height [--data-dir PATH] --validators CSV [--support CSV] --height H [--activation-height H] [--veto-until-height H] [--paused] --amendment-file PATH
   postfiat-node ratify-orchard-aware-bridge-claim-activation-height [--data-dir PATH] --validators CSV [--support CSV] --height H [--activation-height H] [--veto-until-height H] [--paused] --amendment-file PATH
   postfiat-node ratify-pfusdc-source-series-activation-height [--data-dir PATH] --validators CSV [--support CSV] --height H [--activation-height H] [--veto-until-height H] [--paused] --amendment-file PATH
   postfiat-node ratify-shielded-atomic-batch-activation-height [--data-dir PATH] --validators CSV [--support CSV] --height H [--activation-height H] [--veto-until-height H] [--paused] --amendment-file PATH
+  postfiat-node ratify-recipient-format-activation-height [--data-dir PATH] --validators CSV [--support CSV] --height H [--activation-height H] [--veto-until-height H] [--paused] --amendment-file PATH
   postfiat-node ratify-vault-bridge-route-authority-activation-height [--data-dir PATH] --validators CSV [--support CSV] --height H [--activation-height H] [--veto-until-height H] [--paused] --amendment-file PATH
   postfiat-node ratify-replicated-state-v2-activation-height [--data-dir PATH] --validators CSV [--support CSV] --height H [--activation-height H] [--veto-until-height H] [--paused] --amendment-file PATH
   postfiat-node ratify-bridge-exit-root-activation-height [--data-dir PATH] --validators CSV [--support CSV] --height H [--activation-height H] [--veto-until-height H] [--paused] --amendment-file PATH
@@ -789,6 +792,7 @@ fn print_usage() {
   postfiat-node fastpay-recovery-governance-bootstrap-assemble [--data-dir PATH] --payload-file PATH --signed-amendment-file PATH --proposal-slot H --batch-file PATH
   postfiat-node fastpay-committee-prepare [--data-dir PATH] [--registry-file PATH] [--valid-from H] [--new-orders-through H]
   postfiat-node fastswap-store-migrate --data-dir PATH [--dry-run] [--backup-dir PATH]
+  postfiat-node fastswap-committee-migrate --data-dir PATH --committee-file PATH --anchor-file PATH [--backup-dir PATH] [--validator-id ID] [--dry-run]
   postfiat-node apply-governance-batch [--data-dir PATH] --batch-file PATH [--certificate-file PATH]
   postfiat-node account [--data-dir PATH] --address ADDRESS
   postfiat-node account-tx [--data-dir PATH] --address ADDRESS [--from-height HEIGHT] [--to-height HEIGHT] [--limit N]

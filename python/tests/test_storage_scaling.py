@@ -12,6 +12,7 @@ import postfiat_rpc.storage_scaling as storage_scaling
 
 from postfiat_rpc.storage_scaling import (
     ARTIFACT_SCHEMAS,
+    CERTIFIED_SEND_WORK_GATE_SCHEMA,
     MANIFEST_FILE,
     MATERIAL_STAGE_PATHS,
     PERFORMANCE_RESOURCE_FIELDS,
@@ -19,6 +20,9 @@ from postfiat_rpc.storage_scaling import (
     RESOURCE_SAMPLE_SCHEMA,
     RESOURCE_SAMPLE_TARGET_INTERVAL_MS,
     REQUIRED_TAMPER_CASES,
+    ROUND_COVERAGE_GATE_SCHEMA,
+    ROUND_COVERAGE_STAGE_FIELDS,
+    VOTE_LOCK_WORK_GATE_SCHEMA,
     REQUIRED_TAMPER_REASONS,
     StorageScalingVerificationError,
     serve_verified_packet,
@@ -343,11 +347,30 @@ def _passing_packet(packet: Path) -> None:
             "full_history_bytes_read": full_history_bytes,
         }
 
-    def performance_round_timings(lane_name: str) -> dict[str, object]:
+    def performance_round_timings(
+        lane_name: str,
+        iteration_index: int,
+    ) -> dict[str, object]:
         proposal_work = performance_storage_work(lane_name, apply_stage=False)
         apply_work = performance_storage_work(lane_name, apply_stage=True)
+        omitted_validator = (iteration_index - 1) % 6
         return {
+            "total_ms": 135.0,
+            "outbox_resume_node_id": "validator-0",
+            "outbox_resume_ms": 10.0,
+            "outbox_tombstones_validated": 0,
+            "outbox_files_read": 0,
+            "outbox_bytes_hashed": 0,
+            "outbox_index_files_read": 1,
+            "outbox_index_bytes_read": 128,
+            "outbox_completed_entries_enumerated": 0,
+            "outbox_jobs_compacted": 0,
+            "outbox_jobs_pruned": 0,
+            "outbox_index_migration_performed": False,
+            "shielded_verifier_prewarm": {"total_ms": 5.0},
+            "setup_ms": 10.0,
             "proposal_ms": 10.0,
+            "target_selection_ms": 10.0,
             "verification_ms": 10.0,
             "vote_requests_ms": 10.0,
             "local_vote_ms": 10.0,
@@ -364,14 +387,18 @@ def _passing_packet(packet: Path) -> None:
                     "vote_request_breakdown": {
                         "remote_handling": {
                             "block_vote_breakdown": {
+                                "vote_lock_files_examined": 3,
+                                "vote_lock_bytes_decoded": 4_096,
+                                "vote_lock_migration_performed": False,
                                 "storage_work": performance_storage_work(
                                     lane_name, apply_stage=False
-                                )
+                                ),
                             }
                         }
                     },
                 }
-                for validator in range(1, 6)
+                for validator in range(6)
+                if validator != omitted_validator
             ],
             "local_apply_breakdown": {
                 "write_commit_ms": 10.0,
@@ -385,7 +412,8 @@ def _passing_packet(packet: Path) -> None:
                         lane_name, apply_stage=True
                     ),
                 }
-                for validator in range(1, 6)
+                for validator in range(6)
+                if validator != omitted_validator
             ],
         }
 
@@ -461,6 +489,7 @@ def _passing_packet(packet: Path) -> None:
                         "iterations": [
                             {
                                 "iteration": iteration_index,
+                                "source_node": "validator-0",
                                 "round_ok": True,
                                 "receipt_accepted": True,
                                 "finality_confirmed": True,
@@ -479,7 +508,8 @@ def _passing_packet(packet: Path) -> None:
                                 "consensus_round_ms": consensus,
                                 "wallet_to_finality_ms": wallet,
                                 "round_timings": performance_round_timings(
-                                    lane_name
+                                    lane_name,
+                                    iteration_index,
                                 ),
                             }
                             for iteration_index in range(1, 51)
@@ -651,6 +681,136 @@ def _passing_packet(packet: Path) -> None:
                     "network_received_bytes": 80,
                     "network_transmitted_bytes": 90,
                 }
+                vote_lock_work = {
+                    "schema": VOTE_LOCK_WORK_GATE_SCHEMA,
+                    "passed": True,
+                    "reason_codes": [],
+                    "limits": {
+                        "migration_max_per_validator_per_window_restore": 1,
+                        "migration_allowed_validator_reservation_observation": 1,
+                        "non_migration_max_files_examined": 3,
+                        "non_migration_max_bytes_decoded": 4_096,
+                        "legacy_absent_fields_default_to_zero_false": True,
+                    },
+                    "rounds_observed": 50,
+                    "validators_observed": 6,
+                    "validators": {
+                        f"validator-{validator}": {
+                            "passed": True,
+                            "votes_observed": sum(
+                                1
+                                for iteration_index in range(1, 51)
+                                if (iteration_index - 1) % 6 != validator
+                            ),
+                            "migration_rounds": [],
+                            "max_files_examined": 3,
+                            "max_bytes_decoded": 4_096,
+                            "reason_codes": [],
+                            "violations": [],
+                        }
+                        for validator in range(6)
+                    },
+                }
+                vote_lock_path = (
+                    packet
+                    / "performance"
+                    / "vote-lock-work"
+                    / lane_name
+                    / f"height-{height}-window-{window_index + 1}.json"
+                )
+                _write_json(vote_lock_path, vote_lock_work)
+                certified_send_work = {
+                    "schema": CERTIFIED_SEND_WORK_GATE_SCHEMA,
+                    "passed": True,
+                    "reason_codes": [],
+                    "limits": {
+                        "migration_max_per_validator_per_window_restore": 1,
+                        "migration_allowed_validator_resume_observation": 1,
+                        "max_jobs_compacted_per_resume": 5,
+                        "max_jobs_pruned_per_resume": 5,
+                        "files_per_validated_tombstone": 3,
+                        "max_hashed_bytes_per_tombstone": 64 * 1024
+                        + 2 * 4 * 1024 * 1024,
+                        "max_index_files_read": 1,
+                        "max_index_bytes_read": 4 * 1024 * 1024,
+                        "max_completed_entries_enumerated": 2_048,
+                        "legacy_absent_fields_default_to_zero_false": True,
+                    },
+                    "rounds_observed": 50,
+                    "validators_observed": 1,
+                    "validators": {
+                        "validator-0": {
+                            "passed": True,
+                            "resumes_observed": 50,
+                            "migration_rounds": [],
+                            "max_tombstones_validated": 0,
+                            "max_files_read": 0,
+                            "max_bytes_hashed": 0,
+                            "max_index_files_read": 1,
+                            "max_index_bytes_read": 128,
+                            "max_completed_entries_enumerated": 0,
+                            "reason_codes": [],
+                            "violations": [],
+                        }
+                    },
+                }
+                certified_send_path = (
+                    packet
+                    / "performance"
+                    / "certified-send-work"
+                    / lane_name
+                    / f"height-{height}-window-{window_index + 1}.json"
+                )
+                _write_json(certified_send_path, certified_send_work)
+                round_coverage = {
+                    "schema": ROUND_COVERAGE_GATE_SCHEMA,
+                    "passed": True,
+                    "reason_codes": [],
+                    "tolerated_stall_rounds": [],
+                    "limits": {
+                        "max_unattributed_residual_ms": 100.0,
+                        "max_isolated_stall_residual_ms": 250.0,
+                        "max_tolerated_stall_rounds_per_window": 1,
+                        "minimum_residual_ms": -1.0,
+                        "named_stage_fields": list(ROUND_COVERAGE_STAGE_FIELDS),
+                        "shielded_verifier_prewarm_field": (
+                            "shielded_verifier_prewarm.total_ms"
+                        ),
+                        "overlapping_diagnostic_fields_excluded": [
+                            "local_vote_ms",
+                            "client_visible_finality_ms",
+                            "legacy_certificate_ms",
+                            "consensus_v2_prepare_qc_ms",
+                            "consensus_v2_precommit_votes_ms",
+                            "consensus_v2_precommit_qc_ms",
+                            "consensus_v2_commit_assembly_ms",
+                            "consensus_v2_commit_attach_write_ms",
+                        ],
+                    },
+                    "rounds_observed": 50,
+                    "max_residual_ms": 20.0,
+                    "rounds": [
+                        {
+                            "finalized_round": iteration_index,
+                            "source_node": "validator-0",
+                            "total_ms": 135.0,
+                            "named_stage_ms": 115.0,
+                            "residual_ms": 20.0,
+                            "passed": True,
+                            "tolerated_stall": False,
+                            "reason_code": None,
+                        }
+                        for iteration_index in range(1, 51)
+                    ],
+                }
+                round_coverage_path = (
+                    packet
+                    / "performance"
+                    / "round-coverage"
+                    / lane_name
+                    / f"height-{height}-window-{window_index + 1}.json"
+                )
+                _write_json(round_coverage_path, round_coverage)
                 windows.append(
                     {
                         "label": f"height-{height}-window-{window_index + 1}",
@@ -660,6 +820,31 @@ def _passing_packet(packet: Path) -> None:
                         "validators_converged": 6,
                         "literal_receipts_exact": True,
                         "backend_work_gate_pass": True,
+                        "vote_lock_work_gate_pass": True,
+                        "vote_lock_work_gate_reason_codes": [],
+                        "vote_lock_work": vote_lock_work,
+                        "vote_lock_work_receipt": (
+                            vote_lock_path.relative_to(packet).as_posix()
+                        ),
+                        "vote_lock_work_receipt_sha256": _sha256(vote_lock_path),
+                        "certified_send_work_gate_pass": True,
+                        "certified_send_work_gate_reason_codes": [],
+                        "certified_send_work": certified_send_work,
+                        "certified_send_work_receipt": (
+                            certified_send_path.relative_to(packet).as_posix()
+                        ),
+                        "certified_send_work_receipt_sha256": _sha256(
+                            certified_send_path
+                        ),
+                        "round_coverage_gate_pass": True,
+                        "round_coverage_gate_reason_codes": [],
+                        "round_coverage": round_coverage,
+                        "round_coverage_receipt": (
+                            round_coverage_path.relative_to(packet).as_posix()
+                        ),
+                        "round_coverage_receipt_sha256": _sha256(
+                            round_coverage_path
+                        ),
                         "zero_full_history_reads": full_history_records == 0
                         and full_history_bytes == 0,
                         "bounded_index_pages": lane_name != "legacy-jsonl",
@@ -696,6 +881,7 @@ def _passing_packet(packet: Path) -> None:
                         "resources": resources,
                         "normalized_report": raw_path.relative_to(packet).as_posix(),
                         "normalized_report_sha256": _sha256(raw_path),
+                        "source_normalized_report_sha256": _sha256(raw_path),
                         "resource_samples": resource_path.relative_to(packet).as_posix(),
                         "resource_samples_sha256": _sha256(resource_path),
                     }
@@ -1023,7 +1209,7 @@ def _passing_packet(packet: Path) -> None:
             "height_50_window_p95_median_ms": 10.0,
             "max_same_height_window_range_ms": 0.0,
             "predicted_delta_50_to_5000_ms": 0.0,
-            "material_threshold_ms": 1.0,
+            "material_threshold_ms": 5.0,
             "relative_materiality": 0.10,
             "residual_sigmas": 2.0,
             "material_positive_linear_relationship": False,
@@ -1445,6 +1631,9 @@ def _passing_packet(packet: Path) -> None:
             "ratios": performance_ratios,
             "comparison_windows_pass": True,
             "window_gates_pass": True,
+            "vote_lock_work_gates_pass": True,
+            "certified_send_work_gates_pass": True,
+            "round_coverage_gates_pass": True,
             "height_relationship_model": {
                 "schema": "postfiat-storage-height-cost-model-v2",
                 "sample_kind": "per_window_p95",
@@ -1496,11 +1685,9 @@ def _passing_packet(packet: Path) -> None:
             "network_contacted": False,
         },
         "migration": migration_report,
-        "redaction": {
-            "schema": ARTIFACT_SCHEMAS["redaction"],
-            "passed": True,
-            "allowed_nonlocal_ip_files": [],
-        },
+        "redaction": _redaction_record(
+            frozenset(str(binary["path"]) for binary in binaries)
+        ),
     }
     artifacts = {}
     for label, report in reports.items():
@@ -1652,6 +1839,9 @@ def _add_prepared_input_build(packet: Path) -> None:
             "paired_runner_sha256": "b" * 64,
             "selected_runner_sha256": "c" * 64,
             "shared_runner_sha256": "d" * 64,
+            "vote_lock_work_gate_schema": VOTE_LOCK_WORK_GATE_SCHEMA,
+            "certified_send_work_gate_schema": CERTIFIED_SEND_WORK_GATE_SCHEMA,
+            "round_coverage_gate_schema": ROUND_COVERAGE_GATE_SCHEMA,
         },
         "public_inputs": {
             "topology_sha256": selected["topology_sha256"],
@@ -1815,6 +2005,8 @@ def _rewrite_first_selected_resource_samples(
 def _rewrite_first_selected_normalized_report(
     packet: Path,
     mutation: Callable[[dict[str, object]], None],
+    *,
+    keep_source: bool = False,
 ) -> None:
     performance_path = packet / "artifacts" / "performance.json"
     performance = json.loads(performance_path.read_text(encoding="utf-8"))
@@ -1825,11 +2017,254 @@ def _rewrite_first_selected_normalized_report(
     mutation(normalized)
     _write_json(normalized_path, normalized)
     window["normalized_report_sha256"] = _sha256(normalized_path)
+    if not keep_source:
+        # Model a campaign whose own report already held this content.
+        window["source_normalized_report_sha256"] = window["normalized_report_sha256"]
     performance["rows"] = selected["rows"]
     _write_json(performance_path, performance)
     manifest_path = packet / MANIFEST_FILE
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["artifacts"]["performance"]["sha256"] = _sha256(performance_path)
+    _write_json(manifest_path, manifest)
+    _write_checksums(packet)
+
+
+def _rewrite_redaction(
+    packet: Path,
+    mutation: Callable[[dict[str, object]], None],
+) -> None:
+    redaction_path = packet / "artifacts" / "redaction.json"
+    redaction = json.loads(redaction_path.read_text(encoding="utf-8"))
+    mutation(redaction)
+    _write_json(redaction_path, redaction)
+    manifest_path = packet / MANIFEST_FILE
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["artifacts"]["redaction"]["sha256"] = _sha256(redaction_path)
+    _write_json(manifest_path, manifest)
+    _write_checksums(packet)
+
+
+def _redaction_record(binary_paths: frozenset[str]) -> dict[str, object]:
+    return {
+        "schema": ARTIFACT_SCHEMAS["redaction"],
+        "passed": True,
+        "allowed_nonlocal_ip_files": [],
+        "unscanned_binary_paths": sorted(binary_paths),
+        "unscanned_binary_reason": storage_scaling.REDACTION_BINARY_EXEMPTION_REASON,
+        "unscanned_files_over_bytes": storage_scaling.REDACTION_MAX_SCANNED_BYTES,
+    }
+
+
+def _set_vote_lock_migration(report: dict[str, object], rounds: tuple[int, ...]) -> None:
+    # validator-2 votes in rounds 1 and 2 (offsets 0 and 1) of the fixture.
+    for offset in rounds:
+        for target in report["iterations"][offset]["round_timings"]["vote_request_targets"]:
+            if target["target"] == "validator-2":
+                breakdown = target["vote_request_breakdown"]["remote_handling"][
+                    "block_vote_breakdown"
+                ]
+                breakdown["vote_lock_migration_performed"] = True
+
+
+def _set_certified_send_migration(
+    report: dict[str, object], rounds: tuple[int, ...]
+) -> None:
+    # validator-0 resumes in every round of the fixture.
+    for offset in rounds:
+        report["iterations"][offset]["round_timings"][
+            "outbox_index_migration_performed"
+        ] = True
+
+
+def _add_round_one_time(report: dict[str, object], milliseconds: float) -> None:
+    report["iterations"][0]["round_timings"]["total_ms"] += milliseconds
+
+
+def _height_model_inputs(
+    growth_ms: float,
+) -> tuple[dict[str, object], dict[str, list[dict[str, object]]], dict[str, list[float]]]:
+    observations = {
+        stage: [
+            {
+                "height": height,
+                "window": f"height-{height}-window-{index}",
+                "p95_ms": 10.0 + (growth_ms if height == 5000 and stage == "proposal_ms" else 0.0),
+            }
+            for height in (50, 5000)
+            for index in range(1, 6)
+        ]
+        for stage in MATERIAL_STAGE_PATHS
+    }
+    performance = {
+        "height_relationship_model": {
+            "schema": "postfiat-storage-height-cost-model-v2",
+            "sample_kind": "per_window_p95",
+            "relative_materiality": 0.10,
+            "residual_sigmas": 2.0,
+            "stages": {stage: {} for stage in MATERIAL_STAGE_PATHS},
+        }
+    }
+    return performance, observations, {stage: [10.0] * 5 for stage in MATERIAL_STAGE_PATHS}
+
+
+REPLACEMENT_HEIGHT = 1123
+REPLACEMENT_MANIFEST_SHA256 = (
+    "d957141e68a29f8cf690aec9f9193ec0631fede0fad95a2329f4cf3a8b21189a"
+)
+SIGNED_ARCHIVE_STEPS = (
+    "snapshot-import-signed-finalized-checkpoint",
+    "status",
+    "verify-finalized-checkpoint",
+    "verify-state",
+)
+
+
+def _replace_915_with_signed_archive(
+    packet: Path,
+    receipt_mutation: Callable[[dict[str, object]], None] | None = None,
+    *,
+    verify_only: bool = True,
+    verify_only_mutation: Callable[[dict[str, object]], None] | None = None,
+    sentinel_mutation: Callable[[dict[str, object]], None] | None = None,
+) -> None:
+    """Turn a passing pair packet into the 1123-canary replacement shape."""
+    revision = "b" * 40
+    tip, root = "c" * 96, "d" * 96
+    identity = {
+        "chain_id": "postfiat-wan-devnet-2",
+        "genesis_hash": (
+            "ce22ca8c932da0998b484483a09647138a30e0bf44408dd49a8d6d452787ad255"
+            "21aff3ed334da07e150a7233a3e90a9"
+        ),
+        "protocol_version": 1,
+    }
+    (packet / "replay" / "height-915.json").unlink()
+    base = packet / "replay" / f"signed-archive-{REPLACEMENT_HEIGHT}"
+    outputs: dict[str, dict[str, object]] = {
+        "snapshot-import-signed-finalized-checkpoint": {
+            **identity,
+            "block_height": REPLACEMENT_HEIGHT,
+        },
+        "status": {
+            **identity,
+            "block_height": REPLACEMENT_HEIGHT,
+            "block_tip_hash": tip,
+            "state_root": root,
+        },
+        "verify-finalized-checkpoint": {
+            **identity,
+            "verified": True,
+            "checkpoint_height": REPLACEMENT_HEIGHT,
+            "checkpoint_block_hash": tip,
+            "checkpoint_state_root": root,
+        },
+        "verify-state": {
+            **identity,
+            "verified": True,
+            "block_log": {
+                "verified": True,
+                "block_count": REPLACEMENT_HEIGHT,
+                "tip_hash": tip,
+                "state_root": root,
+            },
+        },
+    }
+    steps = {}
+    for name in SIGNED_ARCHIVE_STEPS:
+        path = base / "steps" / f"{name}.json"
+        _write_json(path, outputs[name])
+        steps[name] = {"path": f"steps/{name}.json", "sha256": _sha256(path)}
+    receipt: dict[str, object] = {
+        "schema": "postfiat-storage-signed-archive-replay-receipt-v1",
+        "source_height": REPLACEMENT_HEIGHT,
+        "source_kind": "signed_archive",
+        "block_count": REPLACEMENT_HEIGHT,
+        "commitment_version": "postfiat.replicated_state.v2",
+        "storage_activation_height": 930,
+        "exact_replay": True,
+        "full_replay_passed": True,
+        "tip_hash": tip,
+        "state_root": root,
+        "matched": {"height": True, "tip": True, "root": True},
+        "verdict": "PASS",
+        **identity,
+        "node_id": "validator-1",
+        "publisher": "pf" + "4" * 40,
+        "signed_manifest_sha256": REPLACEMENT_MANIFEST_SHA256,
+        "trusted_publisher_file_sha256": "5" * 64,
+        "source_tree_sha256": "6" * 64,
+        "source_tree_sha256_after": "6" * 64,
+        "steps": steps,
+        "source_revision": revision,
+        "harness_revision": "7" * 40,
+        "node_binary_sha256": _sha256(packet / "bin" / "postfiat-node"),
+        "node_binary_build": {"git_revision": revision[:8], "profile": "release"},
+        "offline": True,
+        "network_contacted": False,
+    }
+    if receipt_mutation is not None:
+        receipt_mutation(receipt)
+    receipt_path = base / "receipts" / f"height-{REPLACEMENT_HEIGHT}.json"
+    _write_json(receipt_path, receipt)
+
+    replay_path = packet / "artifacts" / "replay.json"
+    replay = json.loads(replay_path.read_text(encoding="utf-8"))
+    del replay["quarantine_archive_blocks"]
+    replay["receipts"] = [
+        reference
+        for reference in replay["receipts"]
+        if reference["path"] != "replay/height-915.json"
+    ]
+    if verify_only:
+        receipt_924_path = packet / "replay" / "height-924.json"
+        receipt_924 = json.loads(receipt_924_path.read_text(encoding="utf-8"))
+        receipt_924["migration_packet_root"] = "f" * 96
+        receipt_924["logical_store_report"] = {
+            "schema": "postfiat-storage-logical-integrity-v1",
+            "backend": "redb",
+            "finalized_height": 924,
+            "block_count": 924,
+        }
+        _write_json(receipt_924_path, receipt_924)
+        replay["receipts"] = [_reference(packet, receipt_924_path)]
+        output: dict[str, object] = {
+            "schema": "postfiat-storage-migration-report-v1",
+            "verify_only": True,
+            "published": False,
+            "source_tip": {
+                "height": 924,
+                "block_hash": receipt_924["tip_hash"],
+                "state_root": receipt_924["state_root"],
+            },
+            "migration_packet_root": receipt_924["migration_packet_root"],
+            "logical_store_report": receipt_924["logical_store_report"],
+            "canonical_export_receipt": receipt_924["canonical_export_receipt"],
+        }
+        if verify_only_mutation is not None:
+            verify_only_mutation(output)
+        output_path = packet / "replay" / "height-924-verify-only.json"
+        _write_json(output_path, output)
+        sentinel: dict[str, object] = {
+            "output": _reference(packet, output_path),
+            "clone_tree_sha256_before": "1" * 64,
+            "clone_tree_sha256_after": "1" * 64,
+            "target_tree_sha256_before": "2" * 64,
+            "target_tree_sha256_after": "2" * 64,
+        }
+        if sentinel_mutation is not None:
+            sentinel_mutation(sentinel)
+        replay["independent_verify_only"] = sentinel
+    replay["quarantine_archive_replacement"] = {
+        "replaced_height": 915,
+        "replacement_height": REPLACEMENT_HEIGHT,
+        "signed_manifest_sha256": REPLACEMENT_MANIFEST_SHA256,
+        "reason": storage_scaling.QUARANTINE_REPLACEMENT["reason"],
+        "receipt": _reference(packet, receipt_path),
+    }
+    _write_json(replay_path, replay)
+    manifest_path = packet / MANIFEST_FILE
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["artifacts"]["replay"]["sha256"] = _sha256(replay_path)
     _write_json(manifest_path, manifest)
     _write_checksums(packet)
 
@@ -1890,6 +2325,43 @@ class StorageScalingVerifierTests(unittest.TestCase):
             packet = self.packet_dir(temporary)
             _passing_packet(packet)
             _add_prepared_input_build(packet)
+
+            verified = verify_packet(packet)
+
+            self.assertIs(verified.report["verified"], True)
+
+    def test_storage_scaling_packet_verifies_derived_prepared_build_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            packet = self.packet_dir(temporary)
+            _passing_packet(packet)
+            _add_prepared_input_build(packet)
+            manifest_path = (
+                packet / "performance" / "prepared-input" / "manifest.json"
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["prepared_by"] = {
+                "source_manifest_sha256": "f" * 64,
+                "candidate": json.loads(json.dumps(manifest["candidate"])),
+                "batch_builder": json.loads(json.dumps(manifest["batch_builder"])),
+                "runner": json.loads(json.dumps(manifest["runner"])),
+            }
+            _write_json(manifest_path, manifest)
+            performance_path = packet / "artifacts" / "performance.json"
+            performance = json.loads(performance_path.read_text(encoding="utf-8"))
+            performance["prepared_input_manifest_sha256"] = _sha256(manifest_path)
+            performance["prepared_input_build"]["prepared_by"] = manifest[
+                "prepared_by"
+            ]
+            _write_json(performance_path, performance)
+            packet_manifest_path = packet / MANIFEST_FILE
+            packet_manifest = json.loads(
+                packet_manifest_path.read_text(encoding="utf-8")
+            )
+            packet_manifest["artifacts"]["performance"]["sha256"] = _sha256(
+                performance_path
+            )
+            _write_json(packet_manifest_path, packet_manifest)
+            _write_checksums(packet)
 
             verified = verify_packet(packet)
 
@@ -2284,6 +2756,307 @@ class StorageScalingVerifierTests(unittest.TestCase):
             ):
                 verify_packet(packet)
 
+    def test_storage_scaling_packet_rejects_untouched_tombstone_validation(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            packet = self.packet_dir(temporary)
+            _passing_packet(packet)
+
+            def change_outbox_work(report: dict[str, object]) -> None:
+                iterations = report["iterations"]
+                assert isinstance(iterations, list)
+                round_timings = iterations[0]["round_timings"]
+                round_timings["outbox_tombstones_validated"] = 1
+                round_timings["outbox_files_read"] = 3
+                round_timings["outbox_bytes_hashed"] = 1
+
+            _rewrite_first_selected_normalized_report(packet, change_outbox_work)
+            with self.assertRaisesRegex(
+                StorageScalingVerificationError,
+                "CERTIFIED_SEND_UNTOUCHED_TOMBSTONE_VALIDATION",
+            ):
+                verify_packet(packet)
+
+    def test_storage_scaling_redaction_skips_only_recorded_elf_binaries(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            packet = Path(temporary)
+            binary = packet / "bin" / "postfiat-storage-corpus-batches"
+            binary.parent.mkdir()
+            binary.write_bytes(b"\x7fELF/home/builder/.cargo/registry/src/lib.rs")
+            roles = frozenset({"bin/postfiat-storage-corpus-batches"})
+            redaction = _redaction_record(roles)
+            storage_scaling._verify_redaction(packet, redaction, roles)
+            with self.assertRaisesRegex(
+                StorageScalingVerificationError, "host-local path found"
+            ):
+                storage_scaling._verify_redaction(packet, _redaction_record(frozenset()))
+
+    def test_storage_scaling_redaction_scans_a_non_elf_file_in_a_binary_role(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            packet = Path(temporary)
+            binary = packet / "bin" / "postfiat-storage-corpus-batches"
+            binary.parent.mkdir()
+            binary.write_bytes(b"#!/bin/sh\n# /home/builder/notes\n")
+            roles = frozenset({"bin/postfiat-storage-corpus-batches"})
+            with self.assertRaisesRegex(
+                StorageScalingVerificationError, "host-local path found"
+            ):
+                storage_scaling._verify_redaction(packet, _redaction_record(roles), roles)
+
+    def test_storage_scaling_packet_rejects_unrecorded_binary_exemption(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            packet = self.packet_dir(temporary)
+            _passing_packet(packet)
+
+            def drop_exemption(redaction: dict[str, object]) -> None:
+                del redaction["unscanned_binary_paths"]
+
+            _rewrite_redaction(packet, drop_exemption)
+            with self.assertRaisesRegex(
+                StorageScalingVerificationError, "redaction binary exemption"
+            ):
+                verify_packet(packet)
+
+    def test_storage_scaling_packet_rejects_widened_binary_exemption(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            packet = self.packet_dir(temporary)
+            _passing_packet(packet)
+
+            def widen(redaction: dict[str, object]) -> None:
+                paths = list(redaction["unscanned_binary_paths"])
+                redaction["unscanned_binary_paths"] = sorted(
+                    paths + ["artifacts/performance.json"]
+                )
+
+            _rewrite_redaction(packet, widen)
+            with self.assertRaisesRegex(
+                StorageScalingVerificationError, "redaction binary exemption"
+            ):
+                verify_packet(packet)
+
+    def test_storage_scaling_packet_rejects_window_without_source_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            packet = self.packet_dir(temporary)
+            _passing_packet(packet)
+
+            def drop_source(performance: dict[str, object]) -> None:
+                for rows in (
+                    performance["rows"],
+                    performance["lanes"]["selected-indexed"]["rows"],
+                ):
+                    del rows[0]["windows"][0]["source_normalized_report_sha256"]
+
+            _rewrite_performance(packet, drop_source)
+            with self.assertRaisesRegex(
+                StorageScalingVerificationError, "window report source digest"
+            ):
+                verify_packet(packet)
+
+    def test_storage_scaling_packet_accepts_topology_redacted_window(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            packet = self.packet_dir(temporary)
+            _passing_packet(packet)
+
+            def redact(report: dict[str, object]) -> None:
+                report["config"]["topology_file"] = "$TOPOLOGY_FILE"
+
+            _rewrite_first_selected_normalized_report(packet, redact, keep_source=True)
+            self.assertIs(verify_packet(packet).report["verified"], True)
+
+    def test_storage_scaling_packet_rejects_window_rewrite_beyond_topology(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            packet = self.packet_dir(temporary)
+            _passing_packet(packet)
+
+            def other_rewrite(report: dict[str, object]) -> None:
+                report["config"]["topology_file"] = "topology.json"
+
+            _rewrite_first_selected_normalized_report(
+                packet, other_rewrite, keep_source=True
+            )
+            with self.assertRaisesRegex(
+                StorageScalingVerificationError,
+                "window report differs from its campaign source",
+            ):
+                verify_packet(packet)
+
+    def test_storage_scaling_packet_rejects_repeated_vote_lock_migration(self) -> None:
+        self._assert_raw_refusal(
+            lambda report: _set_vote_lock_migration(report, (0, 1)),
+            "VOTE_LOCK_MIGRATION_REPEATED",
+        )
+
+    def test_storage_scaling_packet_rejects_late_vote_lock_migration(self) -> None:
+        self._assert_raw_refusal(
+            lambda report: _set_vote_lock_migration(report, (1,)),
+            "VOTE_LOCK_MIGRATION_AFTER_FIRST_VALIDATOR_RESERVATION",
+        )
+
+    def test_storage_scaling_packet_rejects_repeated_certified_send_migration(
+        self,
+    ) -> None:
+        self._assert_raw_refusal(
+            lambda report: _set_certified_send_migration(report, (0, 1)),
+            "CERTIFIED_SEND_INDEX_MIGRATION_REPEATED",
+        )
+
+    def test_storage_scaling_packet_rejects_late_certified_send_migration(self) -> None:
+        self._assert_raw_refusal(
+            lambda report: _set_certified_send_migration(report, (1,)),
+            "CERTIFIED_SEND_INDEX_MIGRATION_AFTER_FIRST_VALIDATOR_RESUME",
+        )
+
+    def test_storage_scaling_packet_rejects_single_residual_above_250_ms(self) -> None:
+        self._assert_raw_refusal(
+            lambda report: _add_round_one_time(report, 230.01),
+            "ROUND_COVERAGE_RESIDUAL_EXCEEDED",
+        )
+
+    def test_storage_scaling_packet_rejects_residual_below_minus_one_ms(self) -> None:
+        self._assert_raw_refusal(
+            lambda report: _add_round_one_time(report, -21.5),
+            "ROUND_COVERAGE_RESIDUAL_EXCEEDED",
+        )
+
+    def test_storage_scaling_packet_accepts_one_stall_at_exactly_250_ms(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            packet = self.packet_dir(temporary)
+            _passing_packet(packet)
+            _rewrite_first_selected_normalized_report(
+                packet, lambda report: _add_round_one_time(report, 230.0)
+            )
+
+            def record_stall(performance: dict[str, object]) -> None:
+                window = performance["lanes"]["selected-indexed"]["rows"][0][
+                    "windows"
+                ][0]
+                coverage = window["round_coverage"]
+                row = coverage["rounds"][0]
+                row["total_ms"] += 230.0
+                row["residual_ms"] += 230.0
+                row["tolerated_stall"] = True
+                coverage["max_residual_ms"] = row["residual_ms"]
+                coverage["tolerated_stall_rounds"] = [1]
+                receipt_path = packet / window["round_coverage_receipt"]
+                _write_json(receipt_path, coverage)
+                window["round_coverage_receipt_sha256"] = _sha256(receipt_path)
+                performance["rows"] = performance["lanes"]["selected-indexed"]["rows"]
+
+            _rewrite_performance(packet, record_stall)
+            self.assertIs(verify_packet(packet).report["verified"], True)
+
+    def test_height_model_rejects_growth_above_the_5_ms_floor(self) -> None:
+        with mock.patch.object(storage_scaling, "_verify_numeric_structure"):
+            storage_scaling._verify_height_relationship_models(*_height_model_inputs(4.9))
+            with self.assertRaisesRegex(
+                StorageScalingVerificationError,
+                "material stage proposal_ms retains a positive height relationship",
+            ):
+                storage_scaling._verify_height_relationship_models(
+                    *_height_model_inputs(5.1)
+                )
+
+    def _assert_raw_refusal(
+        self,
+        mutation: Callable[[dict[str, object]], None],
+        message: str,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            packet = self.packet_dir(temporary)
+            _passing_packet(packet)
+            _rewrite_first_selected_normalized_report(packet, mutation)
+            with self.assertRaisesRegex(StorageScalingVerificationError, message):
+                verify_packet(packet)
+
+    def test_storage_scaling_packet_accepts_one_isolated_round_stall(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            packet = self.packet_dir(temporary)
+            _passing_packet(packet)
+
+            def stall_round_one(report: dict[str, object]) -> None:
+                iterations = report["iterations"]
+                assert isinstance(iterations, list)
+                iterations[0]["round_timings"]["total_ms"] += 100.0
+
+            _rewrite_first_selected_normalized_report(packet, stall_round_one)
+
+            def record_stall(performance: dict[str, object]) -> None:
+                window = performance["lanes"]["selected-indexed"]["rows"][0][
+                    "windows"
+                ][0]
+                coverage = window["round_coverage"]
+                row = coverage["rounds"][0]
+                row["total_ms"] += 100.0
+                row["residual_ms"] += 100.0
+                row["tolerated_stall"] = True
+                coverage["max_residual_ms"] = row["residual_ms"]
+                coverage["tolerated_stall_rounds"] = [1]
+                receipt_path = packet / window["round_coverage_receipt"]
+                _write_json(receipt_path, coverage)
+                window["round_coverage_receipt_sha256"] = _sha256(receipt_path)
+                performance["rows"] = performance["lanes"]["selected-indexed"]["rows"]
+
+            _rewrite_performance(packet, record_stall)
+            self.assertIs(verify_packet(packet).report["verified"], True)
+
+    def test_storage_scaling_packet_rejects_two_round_stalls_in_one_window(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            packet = self.packet_dir(temporary)
+            _passing_packet(packet)
+
+            def stall_two_rounds(report: dict[str, object]) -> None:
+                iterations = report["iterations"]
+                assert isinstance(iterations, list)
+                for iteration in iterations[:2]:
+                    iteration["round_timings"]["total_ms"] += 100.0
+
+            _rewrite_first_selected_normalized_report(packet, stall_two_rounds)
+            with self.assertRaisesRegex(
+                StorageScalingVerificationError,
+                "ROUND_COVERAGE_RESIDUAL_EXCEEDED",
+            ):
+                verify_packet(packet)
+
+    def test_storage_scaling_packet_rejects_threshold_below_materiality_floor(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            packet = self.packet_dir(temporary)
+            _passing_packet(packet)
+
+            def lower_threshold(performance: dict[str, object]) -> None:
+                for owner in (performance, performance["lanes"]["selected-indexed"]):
+                    stages = owner["height_relationship_model"]["stages"]
+                    stages["proposal_ms"]["material_threshold_ms"] = 1.0
+
+            _rewrite_performance(packet, lower_threshold)
+            with self.assertRaisesRegex(
+                StorageScalingVerificationError,
+                "proposal_ms.material_threshold_ms differs",
+            ):
+                verify_packet(packet)
+
+    def test_storage_scaling_packet_rejects_hidden_round_time(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            packet = self.packet_dir(temporary)
+            _passing_packet(packet)
+
+            def hide_round_time(report: dict[str, object]) -> None:
+                iterations = report["iterations"]
+                assert isinstance(iterations, list)
+                round_timings = iterations[0]["round_timings"]
+                round_timings["total_ms"] += 1_200.0
+
+            _rewrite_first_selected_normalized_report(packet, hide_round_time)
+            with self.assertRaisesRegex(
+                StorageScalingVerificationError,
+                "ROUND_COVERAGE_RESIDUAL_EXCEEDED",
+            ):
+                verify_packet(packet)
+
     def test_storage_scaling_packet_rejects_false_same_binary_claim(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             packet = self.packet_dir(temporary)
@@ -2524,6 +3297,189 @@ class StorageScalingVerifierTests(unittest.TestCase):
             ):
                 verify_packet(packet)
 
+    def test_storage_scaling_packet_accepts_signed_archive_replacement_for_915(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            packet = self.packet_dir(temporary)
+            _passing_packet(packet)
+            _replace_915_with_signed_archive(packet)
+            verified = verify_packet(packet)
+            self.assertIs(verified.report["verified"], True)
+            replacement = verified.report["quarantine_archive_replacement"]
+            self.assertEqual(replacement["replaced_height"], 915)
+            self.assertEqual(replacement["replacement_height"], REPLACEMENT_HEIGHT)
+            self.assertEqual(
+                replacement["signed_manifest_sha256"], REPLACEMENT_MANIFEST_SHA256
+            )
+            self.assertEqual(replacement["source_tree_sha256"], "6" * 64)
+            self.assertEqual(replacement["trusted_publisher_file_sha256"], "5" * 64)
+            self.assertIn("lost", replacement["reason"])
+            self.assertIn("1123", replacement["reason"])
+
+    def test_storage_scaling_packet_rejects_replacement_without_verify_only_output(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            packet = self.packet_dir(temporary)
+            _passing_packet(packet)
+            _replace_915_with_signed_archive(packet, verify_only=False)
+            with self.assertRaisesRegex(
+                StorageScalingVerificationError,
+                "independent verify-only",
+            ):
+                verify_packet(packet)
+
+    def test_storage_scaling_packet_rejects_changed_verify_only_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            packet = self.packet_dir(temporary)
+            _passing_packet(packet)
+            _replace_915_with_signed_archive(packet)
+            output = packet / "replay" / "height-924-verify-only.json"
+            value = json.loads(output.read_text(encoding="utf-8"))
+            value["published"] = True
+            _write_json(output, value)
+            _write_checksums(packet)
+            with self.assertRaisesRegex(
+                StorageScalingVerificationError,
+                "independent verify-only output reference",
+            ):
+                verify_packet(packet)
+
+    def test_storage_scaling_packet_rejects_publishing_verify_only_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            packet = self.packet_dir(temporary)
+            _passing_packet(packet)
+
+            def published(output: dict[str, object]) -> None:
+                output["published"] = True
+
+            _replace_915_with_signed_archive(packet, verify_only_mutation=published)
+            with self.assertRaisesRegex(
+                StorageScalingVerificationError,
+                "independent verify-only output is not a PASS",
+            ):
+                verify_packet(packet)
+
+    def test_storage_scaling_packet_rejects_verify_only_identity_split(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            packet = self.packet_dir(temporary)
+            _passing_packet(packet)
+
+            def other_root(output: dict[str, object]) -> None:
+                output["migration_packet_root"] = "e" * 96
+
+            _replace_915_with_signed_archive(packet, verify_only_mutation=other_root)
+            with self.assertRaisesRegex(
+                StorageScalingVerificationError,
+                "independent verify-only output disagrees with the height-924 receipt",
+            ):
+                verify_packet(packet)
+
+    def test_storage_scaling_packet_rejects_verify_only_tree_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            packet = self.packet_dir(temporary)
+            _passing_packet(packet)
+
+            def mutated(sentinel: dict[str, object]) -> None:
+                sentinel["target_tree_sha256_after"] = "3" * 64
+
+            _replace_915_with_signed_archive(packet, sentinel_mutation=mutated)
+            with self.assertRaisesRegex(
+                StorageScalingVerificationError,
+                "independent verify-only changed the clone or target tree",
+            ):
+                verify_packet(packet)
+
+    def test_storage_scaling_legacy_pair_report_is_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            packet = self.packet_dir(temporary)
+            _passing_packet(packet)
+            verified = verify_packet(packet)
+            self.assertEqual(
+                set(verified.report),
+                {
+                    "schema",
+                    "verified",
+                    "offline",
+                    "live_probe_performed",
+                    "packet_dir",
+                    "captured_at",
+                    "checksum_manifest_sha256",
+                    "checked_file_count",
+                    "tamper_case_count",
+                    "performance_ratios",
+                    "state_distinction",
+                    "conclusion",
+                },
+            )
+
+    def test_storage_scaling_packet_rejects_replacement_on_another_binary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            packet = self.packet_dir(temporary)
+            _passing_packet(packet)
+
+            def other_binary(receipt: dict[str, object]) -> None:
+                receipt["node_binary_sha256"] = "f" * 64
+
+            _replace_915_with_signed_archive(packet, other_binary)
+            with self.assertRaisesRegex(
+                StorageScalingVerificationError,
+                "replacement archive receipt binary identity disagrees",
+            ):
+                verify_packet(packet)
+
+    def test_storage_scaling_packet_rejects_replacement_without_manifest_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            packet = self.packet_dir(temporary)
+            _passing_packet(packet)
+
+            def drop_manifest_hash(receipt: dict[str, object]) -> None:
+                del receipt["signed_manifest_sha256"]
+
+            _replace_915_with_signed_archive(packet, drop_manifest_hash)
+            with self.assertRaisesRegex(
+                StorageScalingVerificationError,
+                "signed manifest hash is missing or differs",
+            ):
+                verify_packet(packet)
+
+    def test_storage_scaling_packet_rejects_replacement_step_hash_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            packet = self.packet_dir(temporary)
+            _passing_packet(packet)
+            _replace_915_with_signed_archive(packet)
+            step = (
+                packet
+                / "replay"
+                / f"signed-archive-{REPLACEMENT_HEIGHT}"
+                / "steps"
+                / "verify-state.json"
+            )
+            value = json.loads(step.read_text(encoding="utf-8"))
+            value["block_log"]["state_root"] = "e" * 96
+            _write_json(step, value)
+            _write_checksums(packet)
+            with self.assertRaisesRegex(
+                StorageScalingVerificationError,
+                "replacement archive step verify-state reference",
+            ):
+                verify_packet(packet)
+
+    def test_storage_scaling_packet_rejects_unapproved_replacement_archive(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            packet = self.packet_dir(temporary)
+            _passing_packet(packet)
+
+            def other_height(receipt: dict[str, object]) -> None:
+                receipt["source_height"] = 1036
+                receipt["block_count"] = 1036
+
+            _replace_915_with_signed_archive(packet, other_height)
+            with self.assertRaisesRegex(
+                StorageScalingVerificationError,
+                "not the approved height",
+            ):
+                verify_packet(packet)
+
     def test_storage_scaling_packet_rejects_migration_replay_identity_split(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             packet = self.packet_dir(temporary)
@@ -2583,12 +3539,11 @@ class StorageScalingVerifierTests(unittest.TestCase):
             _write_json(raw, report)
             performance_path = packet / "artifacts" / "performance.json"
             performance = json.loads(performance_path.read_text(encoding="utf-8"))
-            performance["rows"][0]["windows"][0][
-                "normalized_report_sha256"
-            ] = _sha256(raw)
-            performance["lanes"]["selected-indexed"]["rows"][0]["windows"][0][
-                "normalized_report_sha256"
-            ] = _sha256(raw)
+            for key in ("normalized_report_sha256", "source_normalized_report_sha256"):
+                performance["rows"][0]["windows"][0][key] = _sha256(raw)
+                performance["lanes"]["selected-indexed"]["rows"][0]["windows"][0][
+                    key
+                ] = _sha256(raw)
             _write_json(performance_path, performance)
             manifest_path = packet / MANIFEST_FILE
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))

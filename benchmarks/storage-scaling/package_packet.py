@@ -31,6 +31,7 @@ SENSITIVE = re.compile(
     r"full[-_ ]?viewing[-_ ]?key|master[-_ ]?seed|rseed|ssh[-_ ]?cred",
     re.IGNORECASE,
 )
+REDACTION_MAX_SCANNED_BYTES = 16 * 1024 * 1024
 LOCAL_PATH = re.compile(r"(?:/home/|/Users/|[A-Za-z]:\\\\Users\\\\)")
 NONLOCAL_IPV4 = re.compile(
     r"(?<![0-9.])(?!127\.0\.0\.1\b)(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![0-9.])"
@@ -92,6 +93,23 @@ def copy_file(source: Path, destination: Path) -> None:
     shutil.copyfile(source, destination)
 
 
+def copy_run_report(source: Path, destination: Path) -> None:
+    """Copy a campaign run report, replacing its host-local topology path.
+
+    The runner records `config.topology_file` as an absolute path. Nothing
+    verifies that path; the topology itself is bound by `topology_sha256`.
+    """
+    report = read_json(source)
+    config = report.get("config")
+    if not isinstance(config, dict) or not isinstance(config.get("topology_file"), str):
+        copy_file(source, destination)
+        return
+    config["topology_file"] = "$TOPOLOGY_FILE"
+    if destination.exists():
+        raise ValueError(f"refusing to overwrite packet entry: {destination}")
+    write_json(destination, report)
+
+
 def resolve_campaign_file(
     campaign_root: Path,
     raw: Any,
@@ -139,6 +157,152 @@ def copy_replay(packet: Path, source: Path) -> Path:
     return destination
 
 
+LEGACY_REPLAY_REPORT_SCHEMA = "postfiat-storage-legacy-replay-v1"
+SIGNED_ARCHIVE_RECEIPT_SCHEMA = "postfiat-storage-signed-archive-replay-receipt-v1"
+REPLAY_FLAGS = (
+    "exact_replay",
+    "full_replay_passed",
+    "logical_rebuild_identical",
+    "canonical_export_identical",
+)
+
+
+def copy_verify_only(
+    packet: Path,
+    legacy_report_path: Path,
+    legacy: dict[str, Any],
+    receipt: dict[str, Any],
+) -> dict[str, Any]:
+    """Copy the height-924 `--verify-only` output byte for byte and bind its sentinels."""
+    sentinel = legacy.get("independent_verify_only")
+    if not isinstance(sentinel, dict):
+        raise ValueError("legacy height-924 report omitted its independent verify-only run")
+    source = resolve_report_reference(legacy_report_path, sentinel.get("output"))
+    output = read_json(source)
+    tip = output.get("source_tip")
+    if (
+        output.get("schema") != "postfiat-storage-migration-report-v1"
+        or output.get("verify_only") is not True
+        or output.get("published") is not False
+        or not isinstance(tip, dict)
+        or tip.get("height") != 924
+    ):
+        raise ValueError("independent verify-only output is not a PASS")
+    trees: dict[str, str] = {}
+    for prefix in ("clone", "target"):
+        before = sentinel.get(f"{prefix}_tree_sha256_before")
+        if (
+            not isinstance(before, str)
+            or re.fullmatch(r"[0-9a-f]{64}", before) is None
+            or sentinel.get(f"{prefix}_tree_sha256_after") != before
+        ):
+            raise ValueError("independent verify-only changed the clone or target tree")
+        trees[f"{prefix}_tree_sha256_before"] = before
+        trees[f"{prefix}_tree_sha256_after"] = before
+    if (
+        tip.get("block_hash") != receipt.get("tip_hash")
+        or tip.get("state_root") != receipt.get("state_root")
+        or output.get("migration_packet_root") != receipt.get("migration_packet_root")
+        or output.get("logical_store_report") != receipt.get("logical_store_report")
+        or output.get("canonical_export_receipt") != receipt.get("canonical_export_receipt")
+    ):
+        raise ValueError(
+            "independent verify-only output disagrees with the height-924 receipt"
+        )
+    destination = packet / "replay" / "height-924-verify-only.json"
+    copy_file(source, destination)
+    return {"output": reference(packet, destination), **trees}
+
+
+def copy_replacement_replay(
+    packet: Path,
+    legacy_report_path: Path,
+    archive_receipt_path: Path,
+    binary_digest: str,
+) -> Path:
+    """Bind the approved 1123 signed archive in place of the lost 915 archive.
+
+    The 924 receipt comes from the legacy-source report; the signed-archive
+    receipt and its step outputs are copied byte-for-byte in the harness layout.
+    """
+    sys.path.insert(0, str(PYTHON_ROOT))
+    from postfiat_rpc.storage_scaling import QUARANTINE_REPLACEMENT
+
+    legacy = read_json(legacy_report_path)
+    archive = read_json(archive_receipt_path)
+    if (
+        legacy.get("schema") != LEGACY_REPLAY_REPORT_SCHEMA
+        or legacy.get("verdict") != "PASS"
+        or legacy.get("source_height") != 924
+    ):
+        raise ValueError("legacy height-924 replay report is not a PASS")
+    if (
+        archive.get("schema") != SIGNED_ARCHIVE_RECEIPT_SCHEMA
+        or archive.get("verdict") != "PASS"
+    ):
+        raise ValueError("replacement archive receipt is not a signed-archive PASS")
+    height = QUARANTINE_REPLACEMENT["replacement_height"]
+    if (
+        archive.get("source_height") != height
+        or archive.get("signed_manifest_sha256")
+        != QUARANTINE_REPLACEMENT["signed_manifest_sha256"]
+    ):
+        raise ValueError("replacement archive is not the approved height-915 replacement")
+    for label, value in (("legacy height-924 replay", legacy), ("replacement archive", archive)):
+        if value.get("node_binary_sha256") != binary_digest:
+            raise ValueError(f"{label} binary differs from the packet binary")
+
+    receipts = legacy.get("receipts")
+    if not isinstance(receipts, list) or len(receipts) != 1:
+        raise ValueError("legacy height-924 replay report must bind one receipt")
+    receipt_source = resolve_report_reference(legacy_report_path, receipts[0])
+    receipt = read_json(receipt_source)
+    if receipt.get("source_height") != 924 or any(
+        receipt.get(flag) is not True for flag in REPLAY_FLAGS
+    ):
+        raise ValueError("height-924 replay receipt is not an exact replay")
+    receipt_destination = packet / "replay" / "height-924.json"
+    copy_file(receipt_source, receipt_destination)
+    verify_only = copy_verify_only(packet, legacy_report_path, legacy, receipt)
+
+    base = packet / "replay" / f"signed-archive-{height}"
+    archive_destination = base / "receipts" / archive_receipt_path.name
+    steps = archive.get("steps")
+    if not isinstance(steps, dict) or not steps:
+        raise ValueError("replacement archive receipt omitted its steps")
+    step_sources = [
+        (resolve_report_reference(archive_receipt_path.parent, step), step)
+        for step in steps.values()
+    ]
+    copy_file(archive_receipt_path, archive_destination)
+    for source, step in step_sources:
+        copy_file(source, base.joinpath(*PurePosixPath(step["path"]).parts))
+
+    report = {
+        "schema": ARTIFACT_SCHEMAS["replay"],
+        "authenticated_history_height": 924,
+        "exact_pre_activation_replay": True,
+        "full_replay_passed": True,
+        "logical_rebuild_identical": True,
+        "canonical_export_identical": True,
+        "tip_hash": legacy.get("tip_hash"),
+        "state_root": legacy.get("state_root"),
+        "ordered_history_accumulator": legacy.get("ordered_history_accumulator"),
+        "receipts": [reference(packet, receipt_destination)],
+        "independent_verify_only": verify_only,
+        "quarantine_archive_replacement": {
+            **QUARANTINE_REPLACEMENT,
+            "receipt": reference(packet, archive_destination),
+        },
+        "source_revision": legacy.get("source_revision"),
+        "node_binary_sha256": legacy.get("node_binary_sha256"),
+        "node_binary_build": legacy.get("node_binary_build"),
+    }
+    destination = packet / "artifacts" / "replay.json"
+    write_json(destination, report)
+    return destination
+
+
 def copy_prepared_input(
     packet: Path,
     campaign_root: Path,
@@ -157,6 +321,8 @@ def copy_prepared_input(
         "runner": manifest.get("runner"),
         "build": manifest.get("build"),
     }
+    if manifest.get("prepared_by") is not None:
+        expected_build["prepared_by"] = manifest.get("prepared_by")
     if (
         manifest.get("schema") != PREPARED_INPUT_MANIFEST_SCHEMA
         or report.get("prepared_input_build") != expected_build
@@ -220,7 +386,7 @@ def copy_prepared_input(
                 receipt["signed_transfer_corpus"] = "$SIGNED_TRANSFER_CORPUS"
                 write_json(destination, receipt)
             else:
-                copy_file(source, destination)
+                copy_run_report(source, destination)
             imported_advance[f"source_{field}_sha256"] = manifest_reference[
                 "sha256"
             ]
@@ -379,7 +545,8 @@ def copy_performance(packet: Path, source: Path) -> Path:
                 destination = (
                     packet / "performance" / "windows" / lane_name / f"{label}.json"
                 )
-                copy_file(raw_source, destination)
+                copy_run_report(raw_source, destination)
+                window["source_normalized_report_sha256"] = sha256(raw_source)
                 window["normalized_report"] = destination.relative_to(packet).as_posix()
                 window["normalized_report_sha256"] = sha256(destination)
                 resource_destination = (
@@ -390,6 +557,54 @@ def copy_performance(packet: Path, source: Path) -> Path:
                     resource_destination.relative_to(packet).as_posix()
                 )
                 window["resource_samples_sha256"] = sha256(resource_destination)
+                vote_lock_source = resolve_campaign_file(
+                    campaign_root,
+                    window.get("vote_lock_work_receipt"),
+                    window.get("vote_lock_work_receipt_sha256"),
+                    "performance vote-lock work receipt",
+                )
+                vote_lock_destination = (
+                    packet
+                    / "performance"
+                    / "vote-lock-work"
+                    / lane_name
+                    / f"{label}.json"
+                )
+                copy_file(vote_lock_source, vote_lock_destination)
+                window["vote_lock_work_receipt"] = (
+                    vote_lock_destination.relative_to(packet).as_posix()
+                )
+                window["vote_lock_work_receipt_sha256"] = sha256(
+                    vote_lock_destination
+                )
+                for field, directory, label_text in (
+                    (
+                        "certified_send_work_receipt",
+                        "certified-send-work",
+                        "performance certified-send work receipt",
+                    ),
+                    (
+                        "round_coverage_receipt",
+                        "round-coverage",
+                        "performance round-coverage receipt",
+                    ),
+                ):
+                    source = resolve_campaign_file(
+                        campaign_root,
+                        window.get(field),
+                        window.get(f"{field}_sha256"),
+                        label_text,
+                    )
+                    target = (
+                        packet
+                        / "performance"
+                        / directory
+                        / lane_name
+                        / f"{label}.json"
+                    )
+                    copy_file(source, target)
+                    window[field] = target.relative_to(packet).as_posix()
+                    window[f"{field}_sha256"] = sha256(target)
     report["rows"] = lanes["selected-indexed"]["rows"]
     destination = packet / "artifacts" / "performance.json"
     write_json(destination, report)
@@ -481,11 +696,40 @@ def validate_capture_time(value: str) -> None:
     datetime.fromisoformat(value[:-1] + "+00:00")
 
 
-def scan_redaction(packet: Path, allowed_nonlocal: set[str]) -> None:
+def redaction_record(
+    allowed_nonlocal: set[str],
+    binary_paths: frozenset[str],
+) -> dict[str, Any]:
+    """State what the redaction scan covered, including what it left out."""
+    sys.path.insert(0, str(PYTHON_ROOT))
+    from postfiat_rpc.storage_scaling import REDACTION_BINARY_EXEMPTION_REASON
+
+    return {
+        "schema": ARTIFACT_SCHEMAS["redaction"],
+        "passed": True,
+        "allowed_nonlocal_ip_files": sorted(allowed_nonlocal),
+        "unscanned_binary_paths": sorted(binary_paths),
+        "unscanned_binary_reason": REDACTION_BINARY_EXEMPTION_REASON,
+        "unscanned_files_over_bytes": REDACTION_MAX_SCANNED_BYTES,
+    }
+
+
+def scan_redaction(
+    packet: Path,
+    allowed_nonlocal: set[str],
+    binary_paths: frozenset[str] = frozenset(),
+) -> None:
+    """Scan every evidence file; only ELF files at the bound binary roles are exempt.
+
+    Release binaries embed build-host source paths (panic locations); they are
+    copied byte for byte and bound by SHA-256 in `artifacts/source.json`.
+    """
     for path in packet.rglob("*"):
-        if not path.is_file() or path.stat().st_size > 16 * 1024 * 1024:
+        if not path.is_file() or path.stat().st_size > REDACTION_MAX_SCANNED_BYTES:
             continue
         relative = path.relative_to(packet).as_posix()
+        if relative in binary_paths and path.read_bytes()[:4] == b"\x7fELF":
+            continue
         text = path.read_text(encoding="utf-8", errors="ignore")
         if SENSITIVE.search(text):
             raise ValueError(f"sensitive marker found in packet file: {relative}")
@@ -521,6 +765,12 @@ def main() -> int:
     parser.add_argument("--incompatible-node-bin", type=Path, required=True)
     parser.add_argument("--state-distinction", type=Path, required=True)
     parser.add_argument("--replay-report", type=Path, required=True)
+    parser.add_argument(
+        "--replacement-archive-receipt",
+        type=Path,
+        help="signed-archive receipt replacing the lost 915 archive; "
+        "--replay-report is then the legacy height-924 report",
+    )
     parser.add_argument("--performance-report", type=Path, required=True)
     parser.add_argument("--tamper-report", type=Path, required=True)
     parser.add_argument("--migration-report", type=Path, required=True)
@@ -663,7 +913,16 @@ def main() -> int:
 
     artifact_paths = {
         "source": source_path,
-        "replay": copy_replay(packet, args.replay_report.resolve()),
+        "replay": (
+            copy_replacement_replay(
+                packet,
+                args.replay_report.resolve(),
+                args.replacement_archive_receipt.resolve(),
+                binary_digest,
+            )
+            if args.replacement_archive_receipt is not None
+            else copy_replay(packet, args.replay_report.resolve())
+        ),
         "performance": copy_performance(packet, args.performance_report.resolve()),
         "tamper": copy_tamper(packet, args.tamper_report.resolve()),
         "migration": copy_direct(
@@ -673,15 +932,9 @@ def main() -> int:
         ),
     }
     allowed_nonlocal = set(args.allow_nonlocal_ip_file)
+    binary_paths = frozenset(str(binary["path"]) for binary in binaries)
     redaction_path = packet / "artifacts" / "redaction.json"
-    write_json(
-        redaction_path,
-        {
-            "schema": ARTIFACT_SCHEMAS["redaction"],
-            "passed": True,
-            "allowed_nonlocal_ip_files": sorted(allowed_nonlocal),
-        },
-    )
+    write_json(redaction_path, redaction_record(allowed_nonlocal, binary_paths))
     artifact_paths["redaction"] = redaction_path
 
     state_distinction = read_json(args.state_distinction.resolve())
@@ -702,7 +955,7 @@ def main() -> int:
         },
     }
     write_json(packet / "storage-scaling-packet.json", manifest)
-    scan_redaction(packet, allowed_nonlocal)
+    scan_redaction(packet, allowed_nonlocal, binary_paths)
     write_checksums(packet)
 
     sys.path.insert(0, str(PYTHON_ROOT))

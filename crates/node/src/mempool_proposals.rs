@@ -160,6 +160,33 @@ pub fn submit_signed_offer_transaction_json_to_mempool(
     admit_signed_offer_transaction_to_mempool(&options.data_dir, signed)
 }
 
+/// Stable RPC error code carried by a destination-address admission error,
+/// if the error message contains one.
+pub fn recipient_address_error_code(message: &str) -> Option<&'static str> {
+    [
+        postfiat_crypto_provider::INVALID_RECIPIENT_CHECKSUM_CODE,
+        postfiat_crypto_provider::NONCANONICAL_RECIPIENT_ADDRESS_CODE,
+        postfiat_crypto_provider::INVALID_RECIPIENT_ADDRESS_CODE,
+    ]
+    .into_iter()
+    .find(|code| message.contains(&format!("{code}: ")))
+}
+
+/// Admission-time destination address rule. This is a local policy check
+/// that applies immediately on upgrade; block execution applies the same rule
+/// only from the governed recipient-format activation height.
+pub(super) fn ensure_destination_addresses_admissible(
+    fields: &[(&'static str, &str)],
+) -> io::Result<()> {
+    match destination_address_rejection(fields) {
+        Some((code, message)) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{code}: {message}"),
+        )),
+        None => Ok(()),
+    }
+}
+
 fn admit_signed_transfer_to_mempool(
     data_dir: &Path,
     signed: SignedTransfer,
@@ -167,6 +194,7 @@ fn admit_signed_transfer_to_mempool(
     signed
         .validate()
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    ensure_destination_addresses_admissible(&transfer_destination_addresses(&signed))?;
     let store = NodeStore::new(data_dir);
     let genesis = store.read_genesis()?;
     if signed.unsigned.chain_id != genesis.chain_id
@@ -201,7 +229,13 @@ fn admit_signed_transfer_to_mempool(
     }
     let mut dry_run_ledger = ledger.clone();
     for pending in &mempool.pending {
-        let pending_receipt = execute_transfer(&genesis, &mut dry_run_ledger, &pending.transfer);
+        let pending_receipt = execute_transfer_with_compatibility(
+            &genesis,
+            &mut dry_run_ledger,
+            &pending.transfer,
+            block_height,
+            asset_execution_compatibility,
+        );
         if !pending_receipt.accepted {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -212,7 +246,13 @@ fn admit_signed_transfer_to_mempool(
             ));
         }
     }
-    let dry_run_receipt = execute_transfer(&genesis, &mut dry_run_ledger, &signed);
+    let dry_run_receipt = execute_transfer_with_compatibility(
+        &genesis,
+        &mut dry_run_ledger,
+        &signed,
+        block_height,
+        asset_execution_compatibility,
+    );
     if !dry_run_receipt.accepted {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -223,7 +263,13 @@ fn admit_signed_transfer_to_mempool(
         ));
     }
     for pending in &mempool.pending_payment_v2 {
-        let pending_receipt = execute_payment_v2(&genesis, &mut dry_run_ledger, &pending.payment);
+        let pending_receipt = execute_payment_v2_with_compatibility(
+            &genesis,
+            &mut dry_run_ledger,
+            &pending.payment,
+            block_height,
+            asset_execution_compatibility,
+        );
         if !pending_receipt.accepted {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -319,6 +365,7 @@ fn admit_signed_payment_v2_to_mempool(
     signed
         .validate()
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    ensure_destination_addresses_admissible(&payment_v2_destination_addresses(&signed))?;
     let store = NodeStore::new(data_dir);
     let genesis = store.read_genesis()?;
     if signed.unsigned.chain_id != genesis.chain_id
@@ -353,7 +400,13 @@ fn admit_signed_payment_v2_to_mempool(
     }
     let mut dry_run_ledger = ledger.clone();
     for pending in &mempool.pending {
-        let pending_receipt = execute_transfer(&genesis, &mut dry_run_ledger, &pending.transfer);
+        let pending_receipt = execute_transfer_with_compatibility(
+            &genesis,
+            &mut dry_run_ledger,
+            &pending.transfer,
+            block_height,
+            asset_execution_compatibility,
+        );
         if !pending_receipt.accepted {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -365,7 +418,13 @@ fn admit_signed_payment_v2_to_mempool(
         }
     }
     for pending in &mempool.pending_payment_v2 {
-        let pending_receipt = execute_payment_v2(&genesis, &mut dry_run_ledger, &pending.payment);
+        let pending_receipt = execute_payment_v2_with_compatibility(
+            &genesis,
+            &mut dry_run_ledger,
+            &pending.payment,
+            block_height,
+            asset_execution_compatibility,
+        );
         if !pending_receipt.accepted {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -376,7 +435,13 @@ fn admit_signed_payment_v2_to_mempool(
             ));
         }
     }
-    let dry_run_receipt = execute_payment_v2(&genesis, &mut dry_run_ledger, &signed);
+    let dry_run_receipt = execute_payment_v2_with_compatibility(
+        &genesis,
+        &mut dry_run_ledger,
+        &signed,
+        block_height,
+        asset_execution_compatibility,
+    );
     if !dry_run_receipt.accepted {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -479,6 +544,7 @@ fn admit_signed_asset_transaction_to_mempool(
             !asset_execution_compatibility.bridge_verification_rules_active(block_height),
         )
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    ensure_destination_addresses_admissible(&asset_transaction_destination_addresses(&signed))?;
     if signed.unsigned.chain_id != genesis.chain_id
         || signed.unsigned.genesis_hash != genesis_hash(&genesis)
         || signed.unsigned.protocol_version != genesis.protocol_version
@@ -514,7 +580,13 @@ fn admit_signed_asset_transaction_to_mempool(
     }
     let mut dry_run_ledger = ledger.clone();
     for pending in &mempool.pending {
-        let pending_receipt = execute_transfer(&genesis, &mut dry_run_ledger, &pending.transfer);
+        let pending_receipt = execute_transfer_with_compatibility(
+            &genesis,
+            &mut dry_run_ledger,
+            &pending.transfer,
+            block_height,
+            asset_execution_compatibility,
+        );
         if !pending_receipt.accepted {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -526,7 +598,13 @@ fn admit_signed_asset_transaction_to_mempool(
         }
     }
     for pending in &mempool.pending_payment_v2 {
-        let pending_receipt = execute_payment_v2(&genesis, &mut dry_run_ledger, &pending.payment);
+        let pending_receipt = execute_payment_v2_with_compatibility(
+            &genesis,
+            &mut dry_run_ledger,
+            &pending.payment,
+            block_height,
+            asset_execution_compatibility,
+        );
         if !pending_receipt.accepted {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -852,6 +930,7 @@ fn admit_signed_escrow_transaction_to_mempool(
     signed
         .validate()
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    ensure_destination_addresses_admissible(&escrow_transaction_destination_addresses(&signed))?;
     let store = NodeStore::new(data_dir);
     let genesis = store.read_genesis()?;
     if signed.unsigned.chain_id != genesis.chain_id
@@ -886,7 +965,13 @@ fn admit_signed_escrow_transaction_to_mempool(
     }
     let mut dry_run_ledger = ledger.clone();
     for pending in &mempool.pending {
-        let pending_receipt = execute_transfer(&genesis, &mut dry_run_ledger, &pending.transfer);
+        let pending_receipt = execute_transfer_with_compatibility(
+            &genesis,
+            &mut dry_run_ledger,
+            &pending.transfer,
+            block_height,
+            asset_execution_compatibility,
+        );
         if !pending_receipt.accepted {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -898,7 +983,13 @@ fn admit_signed_escrow_transaction_to_mempool(
         }
     }
     for pending in &mempool.pending_payment_v2 {
-        let pending_receipt = execute_payment_v2(&genesis, &mut dry_run_ledger, &pending.payment);
+        let pending_receipt = execute_payment_v2_with_compatibility(
+            &genesis,
+            &mut dry_run_ledger,
+            &pending.payment,
+            block_height,
+            asset_execution_compatibility,
+        );
         if !pending_receipt.accepted {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -1005,6 +1096,7 @@ fn admit_signed_nft_transaction_to_mempool(
     signed
         .validate()
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    ensure_destination_addresses_admissible(&nft_transaction_destination_addresses(&signed))?;
     let store = NodeStore::new(data_dir);
     let genesis = store.read_genesis()?;
     if signed.unsigned.chain_id != genesis.chain_id
@@ -1219,7 +1311,13 @@ pub(super) fn ledger_after_executable_mempool(
     asset_execution_compatibility: AssetExecutionCompatibility,
 ) -> io::Result<LedgerState> {
     for pending in &mempool.pending {
-        let receipt = execute_transfer(genesis, &mut ledger, &pending.transfer);
+        let receipt = execute_transfer_with_compatibility(
+            genesis,
+            &mut ledger,
+            &pending.transfer,
+            block_height,
+            asset_execution_compatibility,
+        );
         if !receipt.accepted {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -1231,7 +1329,13 @@ pub(super) fn ledger_after_executable_mempool(
         }
     }
     for pending in &mempool.pending_payment_v2 {
-        let receipt = execute_payment_v2(genesis, &mut ledger, &pending.payment);
+        let receipt = execute_payment_v2_with_compatibility(
+            genesis,
+            &mut ledger,
+            &pending.payment,
+            block_height,
+            asset_execution_compatibility,
+        );
         if !receipt.accepted {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -1353,7 +1457,13 @@ fn apply_pending_atomic_and_fastlane(
     // no-candidate prefix independently so those two cases are not conflated.
     let mut without_candidate = base_ledger.clone();
     for pending in &mempool.pending {
-        let receipt = execute_transfer(genesis, &mut without_candidate, &pending.transfer);
+        let receipt = execute_transfer_with_compatibility(
+            genesis,
+            &mut without_candidate,
+            &pending.transfer,
+            block_height,
+            asset_execution_compatibility,
+        );
         if !receipt.accepted {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -1365,7 +1475,13 @@ fn apply_pending_atomic_and_fastlane(
         }
     }
     for pending in &mempool.pending_payment_v2 {
-        let receipt = execute_payment_v2(genesis, &mut without_candidate, &pending.payment);
+        let receipt = execute_payment_v2_with_compatibility(
+            genesis,
+            &mut without_candidate,
+            &pending.payment,
+            block_height,
+            asset_execution_compatibility,
+        );
         if !receipt.accepted {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -1571,7 +1687,13 @@ pub(super) fn verify_mempool_state(
                 ),
             ));
         }
-        let receipt = execute_transfer(genesis, &mut dry_run_ledger, &entry.transfer);
+        let receipt = execute_transfer_with_compatibility(
+            genesis,
+            &mut dry_run_ledger,
+            &entry.transfer,
+            block_height,
+            asset_execution_compatibility,
+        );
         if !receipt.accepted {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -1626,7 +1748,13 @@ pub(super) fn verify_mempool_state(
                 ),
             ));
         }
-        let receipt = execute_payment_v2(genesis, &mut dry_run_ledger, &entry.payment);
+        let receipt = execute_payment_v2_with_compatibility(
+            genesis,
+            &mut dry_run_ledger,
+            &entry.payment,
+            block_height,
+            asset_execution_compatibility,
+        );
         if !receipt.accepted {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -2345,6 +2473,7 @@ fn latest_tx_id_in_execution_order(tails: MempoolFamilyTails<'_>) -> Option<&str
 fn asset_transaction_amount(transaction: &SignedAssetTransaction) -> u64 {
     match &transaction.unsigned.operation {
         AssetTransactionOperation::IssuedPayment(operation) => operation.amount,
+        AssetTransactionOperation::IssuedPaymentV2(operation) => operation.amount,
         AssetTransactionOperation::AssetBurn(operation) => operation.amount,
         AssetTransactionOperation::AssetClawback(operation) => operation.amount,
         _ => 0,
@@ -2418,7 +2547,13 @@ pub fn create_mempool_batch(options: MempoolBatchOptions) -> io::Result<Transact
             remaining.push(entry);
             continue;
         }
-        let receipt = execute_transfer(&genesis, &mut dry_run_ledger, &entry.transfer);
+        let receipt = execute_transfer_with_compatibility(
+            &genesis,
+            &mut dry_run_ledger,
+            &entry.transfer,
+            block_height,
+            asset_execution_compatibility,
+        );
         if receipt.accepted {
             transactions.push(entry.transfer);
         }
@@ -2429,7 +2564,13 @@ pub fn create_mempool_batch(options: MempoolBatchOptions) -> io::Result<Transact
             remaining_payments_v2.push(entry);
             continue;
         }
-        let receipt = execute_payment_v2(&genesis, &mut dry_run_ledger, &entry.payment);
+        let receipt = execute_payment_v2_with_compatibility(
+            &genesis,
+            &mut dry_run_ledger,
+            &entry.payment,
+            block_height,
+            asset_execution_compatibility,
+        );
         if receipt.accepted {
             payments_v2.push(entry.payment);
         }
@@ -2736,6 +2877,7 @@ fn propose_batch_with_optional_required_parent(
     let stage_start = std::time::Instant::now();
     let store = NodeStore::new(&options.data_dir);
     let legacy_work_before = store.work_counters();
+    let opens_before = postfiat_storage::transactional::transactional_open_counts();
     let transactional_work_store = (store.storage_backend_mode()?.is_transactional()
         && store.transactional_storage_configured()?)
     .then(|| store.transactional_store())
@@ -2851,7 +2993,11 @@ fn propose_batch_with_optional_required_parent(
         .map(|(transactional, before)| transactional.work_counters().saturating_delta(before));
     let legacy_work = legacy_work_delta(store.work_counters(), legacy_work_before);
     timings.transactional_work = transactional_work;
-    timings.storage_work = Some(storage_work_report(transactional_work, legacy_work));
+    timings.storage_work = Some(storage_work_report(
+        transactional_work,
+        legacy_work,
+        opens_before,
+    ));
     timings.total_ms = node_timing_elapsed_ms(total_start);
     Ok(BatchProposalWithTimingsReport { proposal, timings })
 }
@@ -3378,6 +3524,53 @@ mod burn5_tests {
             latest_tx_id_in_execution_order(MempoolFamilyTails::default()),
             None
         );
+    }
+
+    // XR-02 (exchange-readiness review 2026-10-23): `verify_mempool` counts a
+    // pending `issued_payment_v2` amount exactly like an `issued_payment`.
+    #[test]
+    fn verify_mempool_amount_counts_issued_payment_v2_like_issued_payment() {
+        let payment = postfiat_types::IssuedPaymentOperation {
+            from: format!("pf{}", "1".repeat(40)),
+            to: format!("pf{}", "2".repeat(40)),
+            issuer: format!("pf{}", "3".repeat(40)),
+            asset_id: "ab".repeat(48),
+            amount: 77,
+        };
+        let asset_transaction = |kind: &str, operation| SignedAssetTransaction {
+            unsigned: postfiat_types::UnsignedAssetTransaction {
+                chain_id: "amount-test".to_string(),
+                genesis_hash: String::new(),
+                protocol_version: 1,
+                address_namespace: ADDRESS_NAMESPACE.to_string(),
+                transaction_kind: kind.to_string(),
+                signature_algorithm_id: String::new(),
+                source: payment.from.clone(),
+                fee: 1,
+                sequence: 1,
+                operation,
+            },
+            algorithm_id: String::new(),
+            public_key_hex: String::new(),
+            signature_hex: String::new(),
+        };
+        let v1 = asset_transaction(
+            postfiat_types::ISSUED_PAYMENT_TRANSACTION_KIND,
+            AssetTransactionOperation::IssuedPayment(payment.clone()),
+        );
+        let v2 = asset_transaction(
+            postfiat_types::ISSUED_PAYMENT_V2_TRANSACTION_KIND,
+            AssetTransactionOperation::IssuedPaymentV2(postfiat_types::IssuedPaymentV2Operation {
+                from: payment.from.clone(),
+                to: payment.to.clone(),
+                issuer: payment.issuer.clone(),
+                asset_id: payment.asset_id.clone(),
+                amount: payment.amount,
+                memos: Vec::new(),
+            }),
+        );
+        assert_eq!(asset_transaction_amount(&v1), 77);
+        assert_eq!(asset_transaction_amount(&v2), 77);
     }
 
     // Quota guards inspect only sender identities, so these fixtures do not

@@ -13,6 +13,9 @@ import pytest
 import postfiat_rpc.pftl_transfer as cli
 from postfiat_rpc.wallet import FaucetPftResult, SendPftResult, TransparentWallet
 
+RECIPIENT = "pfb385030ad80e5f7a59ec93b71f11055e9ccb9230"
+RECIPIENT_CHECKSUMMED = "pfb385030Ad80e5F7a59EC93b71f11055E9cCb9230"
+
 
 class PftlTransferCliTests(unittest.TestCase):
     def test_transfer_report_preserves_large_atom_amount_as_decimal_string(self) -> None:
@@ -43,6 +46,54 @@ class PftlTransferCliTests(unittest.TestCase):
         self.assertEqual(cli.pft_to_atoms("12.5"), 12_500_000)
         self.assertEqual(cli.pft_to_atoms(" 3 "), 3_000_000)
 
+    def test_pft_to_atoms_refuses_extra_decimals_beyond_28_significant_digits(self) -> None:
+        for value in [
+            "1." + "0" * 27 + "1",
+            "1." + "0" * 35 + "1",
+            "12345678901234567890123.4567891",
+            "9999999999999999999999.9999991",
+        ]:
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "^amount has more than 6 decimal places$"):
+                    cli.pft_to_atoms(value)
+
+    def test_pft_to_atoms_keeps_trailing_zero_spellings(self) -> None:
+        for value in ["1.000000000000000000000000000000", "1." + "0" * 40]:
+            with self.subTest(value=value):
+                self.assertEqual(cli.pft_to_atoms(value), 1_000_000)
+
+    def test_pft_to_atoms_scales_long_integers_exactly(self) -> None:
+        for value in ["123456789012345678901234567891", "1" * 60]:
+            with self.subTest(value=value):
+                self.assertEqual(cli.pft_to_atoms(value), int(value) * 10**6)
+
+    def test_pft_to_atoms_existing_results_are_unchanged(self) -> None:
+        for value, atoms in [
+            ("1", 1_000_000),
+            ("1.000001", 1_000_001),
+            ("1e3", 1_000_000_000),
+            ("1E-6", 1),
+            (" 7 ", 7_000_000),
+            ("18446744073709.551615", 2**64 - 1),
+            ("9" * 22 + ".999999", int("9" * 28)),
+        ]:
+            with self.subTest(value=value):
+                self.assertEqual(cli.pft_to_atoms(value), atoms)
+        for value, message in [
+            ("1.0000001", "amount has more than 6 decimal places"),
+            ("18446744073709.5516151", "amount has more than 6 decimal places"),
+            ("0", "amount must be positive"),
+            ("-1", "amount must be positive"),
+            ("abc", "amount must be a decimal PFTL value"),
+            ("NaN", "amount must be a finite decimal PFTL value"),
+            ("Infinity", "amount must be a finite decimal PFTL value"),
+            ("1e400000000", "amount exponent is out of decimal range"),
+            ("1e-400000000", "amount is below PFTL precision"),
+        ]:
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "^" + message + "$"):
+                    cli.pft_to_atoms(value)
+
     def test_send_cli_reports_nan_amount_as_value_error(self) -> None:
         stdout = io.StringIO()
         with (
@@ -55,7 +106,7 @@ class PftlTransferCliTests(unittest.TestCase):
                 [
                     "send",
                     "--to",
-                    "pfrecipient",
+                    RECIPIENT,
                     "--amount",
                     "NaN",
                     "--endpoint",
@@ -74,7 +125,7 @@ class PftlTransferCliTests(unittest.TestCase):
         send.assert_not_called()
 
     def test_faucet_requires_explicit_apply_acknowledgement(self) -> None:
-        args = cli.build_parser().parse_args(["faucet", "--to", "pfrecipient"])
+        args = cli.build_parser().parse_args(["faucet", "--to", RECIPIENT])
         with mock.patch.object(cli, "request_faucet_pft") as request:
             with self.assertRaisesRegex(ValueError, "--allow-faucet-apply"):
                 cli.run_faucet(args)
@@ -88,7 +139,7 @@ class PftlTransferCliTests(unittest.TestCase):
                     "faucet",
                     "--allow-faucet-apply",
                     "--to",
-                    "pfrecipient",
+                    RECIPIENT,
                     "--amount",
                     "20",
                     "--work-dir",
@@ -112,8 +163,53 @@ class PftlTransferCliTests(unittest.TestCase):
         self.assertEqual(report["amount_atoms"], 20_000_000)
         self.assertEqual(report["tx_id"], "tx1")
         kwargs = request.call_args.kwargs
-        self.assertEqual(kwargs["to_address"], "pfrecipient")
+        self.assertEqual(kwargs["to_address"], RECIPIENT)
         self.assertEqual(kwargs["amount"], 20_000_000)
+
+    def test_cli_rejects_a_malformed_recipient_before_any_side_effect(self) -> None:
+        for to, reason in [
+            ("pfrecipient", "wrong_length"),
+            ("pf" + "g" * 40, "non_hex"),
+            ("PF" + RECIPIENT[2:], "uppercase_prefix"),
+            ("pfB385030Ad80e5F7a59EC93b71f11055E9cCb9230", "bad_checksum"),
+        ]:
+            with self.subTest(to=to):
+                stdout = io.StringIO()
+                with (
+                    mock.patch.object(cli, "PostFiatRpcClient") as client_ctor,
+                    mock.patch.object(cli, "load_wallet") as load,
+                    mock.patch.object(cli, "send_pft") as send,
+                    contextlib.redirect_stdout(stdout),
+                ):
+                    exit_code = cli.main(
+                        [
+                            "send",
+                            "--to",
+                            to,
+                            "--endpoint",
+                            "rpc.invalid:27650",
+                            "--wallet-dir",
+                            "/nonexistent",
+                        ]
+                    )
+                self.assertEqual(exit_code, 1)
+                report = json.loads(stdout.getvalue())
+                self.assertFalse(report["ok"])
+                self.assertIn(f"--to is not a valid PFTL address ({reason})", report["error"])
+                client_ctor.assert_not_called()
+                load.assert_not_called()
+                send.assert_not_called()
+
+    def test_address_command_prints_canonical_and_checksummed_forms(self) -> None:
+        for given in [RECIPIENT, RECIPIENT_CHECKSUMMED, f"  {RECIPIENT_CHECKSUMMED}\n"]:
+            with self.subTest(given=given):
+                stdout = io.StringIO()
+                with contextlib.redirect_stdout(stdout):
+                    exit_code = cli.main(["address", given])
+                self.assertEqual(exit_code, 0)
+                report = json.loads(stdout.getvalue())
+                self.assertEqual(report["canonical"], RECIPIENT)
+                self.assertEqual(report["checksummed"], RECIPIENT_CHECKSUMMED)
 
     def test_send_action_loads_wallet_and_delegates_to_send_pft(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -139,7 +235,7 @@ class PftlTransferCliTests(unittest.TestCase):
                 [
                     "send",
                     "--to",
-                    "pfrecipient",
+                    RECIPIENT_CHECKSUMMED,
                     "--amount",
                     "1.25",
                     "--endpoint",
@@ -163,7 +259,7 @@ class PftlTransferCliTests(unittest.TestCase):
         self.assertEqual(load.call_args.kwargs["wallet_dir"], str(root))
         kwargs = send.call_args.kwargs
         self.assertIs(kwargs["wallet"], wallet)
-        self.assertEqual(kwargs["to_address"], "pfrecipient")
+        self.assertEqual(kwargs["to_address"], RECIPIENT)
         self.assertEqual(kwargs["amount"], 1_250_000)
 
 
@@ -200,7 +296,7 @@ def _run_send_cli(
     argv = [
         "send",
         "--to",
-        "pfrecipient",
+        RECIPIENT,
         "--amount",
         "1",
         "--endpoint",

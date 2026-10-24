@@ -1,25 +1,96 @@
 # Account Tx Index
 
-Status: v0 auto-refreshed retained-history index
-Date: 2026-05-16
+Status: v2 retained-history index (memo contents and shielded withdrawals); block commits extend the disk index
+Date: 2026-10-23
 
-`account_tx` is a read-only public RPC method for transparent account history.
-It now prefers disk-backed per-account shards when `account_tx_index_meta.json`
+`account_tx` is a read-only public RPC method for account history: transparent
+transactions, including `payment_v2` memo contents, and transparent credits
+from shielded withdrawals. Row fields are documented in
+`docs/rpc/account-history.md`.
+It prefers disk-backed per-account shards when `account_tx_index_meta.json`
 matches the local chain/genesis/protocol/tip. If the disk index is absent,
 stale, or unreadable, the node falls back to the aggregate
 `account_tx_index.json`; if that is also absent or stale, it falls back to the
 existing bounded retained-history scan instead of failing the public read.
 
 This index is not consensus state. It is an operator cache rebuilt from local
-block/archive/receipt data. Ordered block commit refreshes it automatically on
-a best-effort basis; a cache refresh failure does not block commit, and stale
-or unusable aggregate/disk status remains visible through
-`account_tx_index_status`.
+block/archive/receipt data. Stale or unusable aggregate/disk status stays
+visible through `account_tx_index_status`.
 
-The commit-time refresh first tries a bounded incremental append when the
-existing cache tip is still a known ancestor of the new local tip and matches
-the same chain/genesis/protocol. If that proof does not hold, the node falls
+## Following the chain
+
+Once `account-tx-index-build` has written the indexes, every block commit
+extends both the disk index and the aggregate `account_tx_index.json`. No
+rebuild is needed after each block, and `account_tx_index_status` keeps
+`index_usable` and `disk_index_usable` true.
+
+1. **Order.** The append runs only after the block, its archive entry and its
+   receipts are durable: after the transactional commit returns, or after the
+   ordered commit journal is applied and removed (also on journal recovery at
+   restart).
+2. **What is written.** The block's rows are computed from the commit's own
+   block, archive entry and receipts. The writes go in this order:
+   1. the touched account shards;
+   2. `account_tx_index_meta.json`;
+   3. the aggregate file.
+
+   Each index is extended only from the block's parent.
+3. **Idempotent.** A replayed commit whose block an index already ends at
+   changes nothing in it.
+4. **Never fails the commit.** If an append fails, or the node stops before
+   an index's metadata write, that index stays at an older tip, and later
+   commits do not extend it across the gap. Reads use the next source that is
+   current, in this order: the disk index, the aggregate, then the bounded
+   archive scan (`index_used: false`). Run `account-tx-index-build` to catch it
+   up; commits follow again after that.
+5. **Cost per commit.** The aggregate file and each touched account shard are
+   rewritten whole. On the 1137 import (964 rows, 255 accounts) that means:
+   - the busiest account's shard: 373 rows, 290 KB;
+   - the aggregate: 1,757 row entries, 1.36 MB;
+   - the metadata: 93 KB.
+
+   These costs grow with history. Bounding them needs a file-format change,
+   which is a candidate of the
+   [next release](../plans/active/next-validator-release-plan-20261108.md#candidates).
+6. **No consensus change.** The append changes no block, receipt, ledger or
+   state root. Its time is reported as `refresh_account_tx_index_ms` in the
+   commit write timings.
+
+`account_tx_index_status` reports each index's range against the tip:
+
+- `indexed_from_height`, `indexed_to_height` and `tip_hash` for the aggregate,
+  and `disk_indexed_from_height`, `disk_indexed_to_height` and `disk_tip_hash`
+  for the disk index;
+- `current_tip_height`;
+- `index_lag_blocks` and `disk_index_lag_blocks`: 0 when that index follows the
+  chain, the number of blocks it is behind otherwise, and absent when its tip
+  is not on the local chain.
+
+The build first tries a bounded incremental append when the existing cache tip
+is still a known ancestor of the local tip and the cache matches the same
+chain/genesis/protocol and index schema. If that proof does not hold, it falls
 back to the full retained-history rebuild path.
+
+## Upgrade Backfill
+
+Index schema `postfiat-account-tx-index-v2` (disk index
+`postfiat-account-tx-disk-index-v2`, shards
+`postfiat-account-tx-account-shard-v2`) adds `payment_v2` memo contents and
+shielded-withdrawal rows. After installing a binary with v2 rows, run the build
+once on every node that serves `account_tx`:
+
+```bash
+postfiat-node account-tx-index-build --data-dir <validator-data>
+postfiat-node account-tx-index-status --data-dir <validator-data>
+```
+
+A v1 index is never extended, so this build re-reads every retained block and
+backfills memo contents and historical shielded withdrawals. Before the
+rebuild, status reports `index_usable: false` with
+`unsupported account_tx index schema` and reads use the bounded archive scan
+(`index_used: false`), which already returns v2 rows. After it, status reports
+both indexes usable and reads return `index_used: true`. Rows for history
+pruned below the retained base are not rebuilt.
 
 ## Build
 
@@ -29,8 +100,8 @@ target/debug/postfiat-node account-tx-index-build \
 ```
 
 The local build report includes the aggregate and disk metadata paths, indexed
-height range, transparent row count, account count, shard count, tip hash,
-`index_usable`, and `disk_index_usable`.
+height range, indexed transparent and shielded block and row counts, account
+count, shard count, tip hash, `index_usable`, and `disk_index_usable`.
 
 ## Check
 
